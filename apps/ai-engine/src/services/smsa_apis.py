@@ -10,6 +10,7 @@ import xmltodict
 from pydantic import BaseModel
 
 from ..models.tracking import TrackingCheckpoint, TrackingResult, TrackingStatus
+from ..config.settings import settings
 
 
 class SMSATrackingClientConfig(BaseModel):
@@ -27,12 +28,9 @@ class SMSATrackingClient:
     def __init__(self, config: Optional[SMSATrackingClientConfig] = None) -> None:
         if config is None:
             config = SMSATrackingClientConfig(
-                username=os.getenv("SMSA_TRACKING_USERNAME", "aiagent26"),
-                password=os.getenv("SMSA_TRACKING_PASSWORD", "mERti8P2"),
-                base_url=os.getenv(
-                    "SMSA_TRACKING_BASE_URL",
-                    "http://smsaweb.cloudapp.net:8080/track.svc",
-                ),
+                username=settings.smsa_tracking_username,
+                password=settings.smsa_tracking_password,
+                base_url=settings.smsa_tracking_base_url,
             )
         self._config = config
         self._session: Optional[aiohttp.ClientSession] = None
