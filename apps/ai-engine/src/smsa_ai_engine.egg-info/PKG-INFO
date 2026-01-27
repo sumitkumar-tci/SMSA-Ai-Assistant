@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: smsa_ai_engine
+Version: 0.1.0
+Summary: Python AI engine for SMSA AI Assistant
+Requires-Python: >=3.11
+Requires-Dist: fastapi
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: aiohttp>=3.10.0
+Requires-Dist: xmltodict>=0.13.0
