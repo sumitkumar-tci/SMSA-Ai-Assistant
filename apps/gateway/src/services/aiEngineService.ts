@@ -5,13 +5,14 @@ type ChatMessageRequest = {
   conversationId: string;
   userId?: string;
   message: string;
-  explicitIntent?: "TRACKING";
+  explicitIntent?: "TRACKING" | "RATES" | "LOCATIONS" | "FAQ";
+  selectedAgent?: "tracking" | "rates" | "retail" | "faq";
 };
 
 type TrackingSseEventType = "token" | "done" | "error";
 
 type TrackingSseMetadata = {
-  agent: "tracking";
+  agent: "tracking" | "rates" | "retail" | "faq" | "system";
   timestamp: string;
   conversationId: string;
 };

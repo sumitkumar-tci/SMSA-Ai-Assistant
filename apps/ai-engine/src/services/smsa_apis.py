@@ -347,3 +347,120 @@ class SMSATrackingClient:
         return await asyncio.gather(*tasks)
 
 
+class SMSARatesClient:
+    """
+    Async client for SMSA Rates Inquiry REST API.
+
+    Endpoint: POST https://mobileapi.smsaexpress.com/SmsaMobileWebServiceRestApi/api/RateInquiry/inquiry
+    Headers: Content-Type: application/json, Passkey: riai$ervice
+    """
+
+    def __init__(self) -> None:
+        self._base_url = settings.smsa_rates_base_url
+        self._passkey = settings.smsa_rates_passkey
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(connect=5, total=30)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def get_rate(
+        self,
+        from_country: str,
+        to_country: str,
+        origin_city: str,
+        destination_city: str,
+        weight: str,
+        pieces: str,
+        service_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get shipping rates from SMSA Rates API.
+
+        Args:
+            from_country: Origin country code (e.g., "SA")
+            to_country: Destination country code (e.g., "SA")
+            origin_city: Origin city name (e.g., "Riyadh")
+            destination_city: Destination city name (e.g., "Jeddah")
+            weight: Weight as string (e.g., "5")
+            pieces: Number of pieces as string (e.g., "1")
+            service_type: Optional service type (e.g., "DLV")
+
+        Returns:
+            Dict with success, rates data, and error info if any.
+        """
+        from ..models.rates import RateInquiryRequest, RateInquiryResponse, RateResult
+
+        session = await self._get_session()
+
+        # Build request payload - all fields as strings
+        payload = {
+            "FromCountry": from_country,
+            "ToCountry": to_country,
+            "OriginCity": origin_city,
+            "DestinationCity": destination_city,
+            "Weight": weight,  # Must be string, not number
+            "Pieces": pieces,  # Must be string, not number
+        }
+        if service_type:
+            payload["ServiceType"] = service_type
+
+        headers = {
+            "Content-Type": "application/json",
+            "Passkey": self._passkey,
+        }
+
+        try:
+            async with session.post(
+                self._base_url, json=payload, headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    return RateResult(
+                        success=False,
+                        error_code="HTTP_ERROR",
+                        error_message=f"SMSA rates API error {resp.status}: {text[:200]}",
+                    ).model_dump(by_alias=True)
+
+                json_data = await resp.json()
+
+                # Parse response using Pydantic model
+                api_response = RateInquiryResponse(**json_data)
+
+                # Convert to agent-friendly format
+                rates = []
+                for rate_option in api_response.data:
+                    rates.append(
+                        {
+                            "service": rate_option.service_type,
+                            "serviceName": rate_option.service_name,
+                            "amount": rate_option.charge,
+                            "currency": rate_option.currency,
+                            "eta": rate_option.estimated_days or "N/A",
+                        }
+                    )
+
+                return RateResult(
+                    success=api_response.success,
+                    rates=rates,
+                ).model_dump(by_alias=True)
+
+        except aiohttp.ClientError as e:
+            return RateResult(
+                success=False,
+                error_code="NETWORK_ERROR",
+                error_message=f"Failed to connect to SMSA rates API: {e}",
+            ).model_dump(by_alias=True)
+        except Exception as e:
+            return RateResult(
+                success=False,
+                error_code="PARSE_ERROR",
+                error_message=f"Failed to parse SMSA rates response: {e}",
+            ).model_dump(by_alias=True)
+

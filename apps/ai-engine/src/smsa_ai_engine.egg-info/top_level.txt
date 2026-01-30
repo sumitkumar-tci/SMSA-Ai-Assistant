@@ -1,6 +1,8 @@
 agents
+config
 logging_config
 main
 models
 orchestrator
+prompts
 services

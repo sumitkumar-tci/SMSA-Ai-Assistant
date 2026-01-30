@@ -24,12 +24,16 @@ async def _stream_tracking_response(
         "user_id": body.user_id,
         "message": body.message,
         "explicit_intent": body.explicit_intent,
+        "selected_agent": body.selected_agent,
     }
 
     result = await route_message(context)
 
+    # Get agent name from result, default to "tracking" for backwards compatibility
+    agent_name = result.get("agent", "tracking")
+
     metadata = TrackingSseMetadata(
-        agent="tracking",
+        agent=agent_name,  # type: ignore[arg-type]
         timestamp=datetime.utcnow(),
         conversationId=body.conversation_id,  # type: ignore[call-arg]
     )

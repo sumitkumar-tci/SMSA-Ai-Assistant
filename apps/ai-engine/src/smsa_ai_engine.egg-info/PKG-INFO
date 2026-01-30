@@ -5,5 +5,9 @@ Summary: Python AI engine for SMSA AI Assistant
 Requires-Python: >=3.11
 Requires-Dist: fastapi
 Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pydantic-settings>=2.0.0
 Requires-Dist: aiohttp>=3.10.0
 Requires-Dist: xmltodict>=0.13.0
+Requires-Dist: langgraph>=0.1.0
+Requires-Dist: langchain-core>=0.2.0
+Requires-Dist: motor>=3.3.0

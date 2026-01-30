@@ -10,8 +10,11 @@ class ChatMessageRequest(BaseModel):
     conversation_id: str = Field(..., alias="conversationId")
     user_id: Optional[str] = Field(default=None, alias="userId")
     message: str
-    explicit_intent: Optional[Literal["TRACKING"]] = Field(
+    explicit_intent: Optional[Literal["TRACKING", "RATES", "LOCATIONS", "FAQ"]] = Field(
         default=None, alias="explicitIntent"
+    )
+    selected_agent: Optional[Literal["tracking", "rates", "retail", "faq"]] = Field(
+        default=None, alias="selectedAgent"
     )
 
 
@@ -52,7 +55,7 @@ SseEventType = Literal["token", "done", "error"]
 
 
 class TrackingSseMetadata(BaseModel):
-    agent: Literal["tracking"]
+    agent: Literal["tracking", "rates", "retail", "faq", "system"]
     timestamp: datetime
     conversation_id: str = Field(..., alias="conversationId")
 

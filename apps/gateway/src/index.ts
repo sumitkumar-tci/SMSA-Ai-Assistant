@@ -8,7 +8,12 @@ const app = express();
 
 app.use(express.json());
 app.use(cors());
-app.use(helmet());
+// Configure helmet to allow SSE
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Disable CSP for SSE
+  })
+);
 
 app.use("/api", chatRouter);
 
