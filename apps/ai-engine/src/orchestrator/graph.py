@@ -114,11 +114,14 @@ class SMSAAIAssistantOrchestratorGraph:
 
         Loads file context from OBS if file_id is provided.
         Processes images with Vision API to extract AWB/shipment details.
+        
+        Note: File uploads are only supported for tracking agent.
         """
         file_context: Dict[str, Any] = {}
 
-        # Load file context if file_id is provided
-        if state.file_id:
+        # Load file context if file_id is provided AND agent is tracking
+        # File uploads are only for tracking agent (waybill images)
+        if state.file_id and state.intent == Intent.TRACKING:
             try:
                 # Try to get conversation context from OBS (may contain file metadata)
                 context_data = await self._storage_client.get_conversation_context(
@@ -223,6 +226,7 @@ class SMSAAIAssistantOrchestratorGraph:
         Aggregate and format the final response.
 
         Extracts content and metadata from agent response.
+        Preserves structured data (like tracking events) for frontend rendering.
         """
         content = ""
         metadata: Dict[str, Any] = {}
@@ -233,6 +237,21 @@ class SMSAAIAssistantOrchestratorGraph:
                 "agent": state.agent_response.get("agent", state.agent_name),
                 **state.agent_response.get("metadata", {}),
             }
+            
+            # Preserve structured data from agent response (e.g., tracking events, raw_data)
+            # This allows frontend to render rich UI components
+            if "type" in state.agent_response:
+                metadata["type"] = state.agent_response["type"]
+            if "raw_data" in state.agent_response:
+                metadata["raw_data"] = state.agent_response["raw_data"]
+            if "events" in state.agent_response:
+                metadata["events"] = state.agent_response["events"]
+            if "current_status" in state.agent_response:
+                metadata["current_status"] = state.agent_response["current_status"]
+            if "status_explanation" in state.agent_response:
+                metadata["status_explanation"] = state.agent_response["status_explanation"]
+            if "requires_awb" in state.agent_response:
+                metadata["requires_awb"] = state.agent_response["requires_awb"]
 
         return {
             "content": content,

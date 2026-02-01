@@ -3,6 +3,281 @@
 
 import { useState, useRef } from "react";
 
+// Clean up any reasoning/thinking content from LLM responses
+function cleanReasoningContent(content: string): string {
+  if (!content) return content;
+  
+  // Remove tagged reasoning
+  let cleaned = content.replace(/<think>.*?<\/think>/gis, '');
+  cleaned = cleaned.replace(/<reasoning>.*?<\/reasoning>/gis, '');
+  cleaned = cleaned.replace(/<think>.*?<\/redacted_reasoning>/gis, '');
+  cleaned = cleaned.replace(/<\/?think>/gi, '');
+  cleaned = cleaned.replace(/<\/?reasoning>/gi, '');
+  
+  // Remove plain text reasoning patterns (LLM showing its thinking)
+  // Split by sentences and filter out reasoning sentences
+  const sentences = cleaned.split(/([.!?]\s+)/);
+  const cleanedSentences: string[] = [];
+  
+  for (let i = 0; i < sentences.length; i += 2) {
+    const sentence = sentences[i] || '';
+    const punctuation = sentences[i + 1] || '';
+    const sentenceLower = sentence.toLowerCase().trim();
+    
+    // Skip sentences that start with reasoning patterns
+    const reasoningStarters = [
+      'okay', 'i need to', 'let me', 'first', 'i should', 'maybe',
+      'also', 'the rules', 'the example', 'let me check', 'let me see',
+      'since', 'i should make sure', 'let me structure', 'wts is this',
+      'i have to', 'let me check the', 'the user', 'i need to respond'
+    ];
+    
+    const isReasoning = reasoningStarters.some(starter => sentenceLower.startsWith(starter));
+    
+    // Also skip if sentence is too long and contains reasoning keywords
+    if (!isReasoning && sentence.length > 100) {
+      const hasReasoningKeywords = ['guidelines', 'check', 'structure', 'need to', 'should', 'rules say'].some(
+        keyword => sentenceLower.includes(keyword)
+      );
+      if (hasReasoningKeywords) continue;
+    }
+    
+    if (!isReasoning) {
+      cleanedSentences.push(sentence + punctuation);
+    }
+  }
+  
+  cleaned = cleanedSentences.join('');
+  
+  // Clean up extra whitespace
+  cleaned = cleaned.replace(/\n\s*\n\s*\n+/g, '\n\n');
+  cleaned = cleaned.replace(/\s+/g, ' ');
+  
+  return cleaned.trim();
+}
+
+// Function to render markdown-like content (convert **bold** to <strong>, etc.)
+function renderMarkdown(text: string): string {
+  if (!text) return text;
+  
+  // Convert **bold** to <strong>
+  let html = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  // Convert *italic* to <em> (but not if it's part of **bold**)
+  html = html.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
+  // Convert line breaks
+  html = html.replace(/\n/g, '<br />');
+  
+  return html;
+}
+
+// Tracking Message Component
+function TrackingMessage({ data, content }: { data: TrackingData; content: string }) {
+  const [expandedEvents, setExpandedEvents] = useState(false);
+
+  const formatTimestamp = (timestamp: string) => {
+    if (!timestamp || timestamp.trim() === "") return "N/A";
+    try {
+      const date = new Date(timestamp);
+      if (isNaN(date.getTime())) {
+        // Try parsing as custom format
+        return timestamp;
+      }
+      return new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(date);
+    } catch {
+      return timestamp;
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    const statusLower = status.toLowerCase();
+    if (statusLower.includes("delivered")) return "status-delivered";
+    if (statusLower.includes("transit") || statusLower.includes("out for delivery")) return "status-transit";
+    if (statusLower.includes("exception") || statusLower.includes("returned")) return "status-exception";
+    return "status-pending";
+  };
+
+  return (
+    <div className="tracking-result-card">
+      {/* LLM conversational response */}
+      <div 
+        className="tracking-conversational-content"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+      />
+
+      {/* Current Status - Prominent Display */}
+      <div className="current-status-section">
+        <div className={`status-badge ${getStatusColor(data.currentStatus)}`}>
+          <span className="status-icon">📦</span>
+          <span className="status-text">{data.currentStatus}</span>
+        </div>
+        {data.statusExplanation && (
+          <p className="status-explanation">{data.statusExplanation}</p>
+        )}
+      </div>
+
+      {/* AWB Info */}
+      <div className="awb-info">
+        <span className="label">Tracking Number:</span>
+        <span className="value">{data.awb}</span>
+        <button
+          type="button"
+          className="copy-btn"
+          onClick={() => {
+            navigator.clipboard.writeText(data.awb);
+          }}
+          title="Copy AWB"
+        >
+          📋
+        </button>
+      </div>
+
+      {/* Route Info */}
+      <div className="route-section">
+        <div className="route-item">
+          <span className="route-icon">📍</span>
+          <div>
+            <span className="label">Origin</span>
+            <span className="location">{data.origin}</span>
+          </div>
+        </div>
+        <span className="route-arrow">→</span>
+        <div className="route-item">
+          <span className="route-icon">📍</span>
+          <div>
+            <span className="label">Destination</span>
+            <span className="location">{data.destination}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Timeline of Events */}
+      {data.events && data.events.length > 0 && (
+        <div className="events-timeline">
+          <button
+            type="button"
+            className="toggle-events"
+            onClick={() => setExpandedEvents(!expandedEvents)}
+          >
+            <span>📦</span>
+            <span>Shipment Journey ({data.events.length} events)</span>
+            <span className={`chevron ${expandedEvents ? "expanded" : ""}`}>▼</span>
+          </button>
+
+          {expandedEvents && (
+            <div className="timeline">
+              {data.events.map((event, index) => (
+                <TimelineEvent
+                  key={index}
+                  event={event}
+                  isLatest={index === 0}
+                  isFirst={index === data.events.length - 1}
+                  formatTimestamp={formatTimestamp}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Additional Info */}
+      {(data.serviceType || data.estimatedDelivery) && (
+        <div className="additional-info">
+          {data.serviceType && (
+            <div className="info-item">
+              <span>🚚</span>
+              <span>{data.serviceType}</span>
+            </div>
+          )}
+          {data.estimatedDelivery && (
+            <div className="info-item">
+              <span>⏰</span>
+              <span>Est. Delivery: {data.estimatedDelivery}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Timeline Event Component
+function TimelineEvent({
+  event,
+  isLatest,
+  isFirst,
+  formatTimestamp,
+}: {
+  event: TrackingEvent;
+  isLatest: boolean;
+  isFirst: boolean;
+  formatTimestamp: (ts: string) => string;
+}) {
+  return (
+    <div className={`timeline-event ${isLatest ? "latest" : ""}`}>
+      <div className="timeline-marker">
+        <div className={`marker-dot ${isLatest ? "active" : ""}`} />
+        {!isFirst && <div className="marker-line" />}
+      </div>
+
+      <div className="event-content">
+        <div className="event-header">
+          <span className="event-status">{event.status}</span>
+          <span className="event-time">{formatTimestamp(event.timestamp)}</span>
+        </div>
+        <div className="event-location">
+          <span>📍</span>
+          <span>{event.location}</span>
+        </div>
+        <p className="event-description">{event.description}</p>
+      </div>
+    </div>
+  );
+}
+
+// Loading State Component
+function TrackingLoadingState({ stage }: { stage: "searching" | "processing" | "formatting" }) {
+  const stages = [
+    { id: "searching", label: "Looking up shipment...", icon: "🔍" },
+    { id: "processing", label: "Processing tracking data...", icon: "⚙️" },
+    { id: "formatting", label: "Preparing results...", icon: "✨" },
+  ];
+
+  return (
+    <div className="tracking-loading">
+      <div className="loading-animation">
+        <div className="truck-icon">🚚</div>
+        <div className="road-line" />
+      </div>
+
+      <div className="loading-stages">
+        {stages.map((s, idx) => {
+          const isActive = s.id === stage;
+          const stageIndex = stages.findIndex((st) => st.id === stage);
+          const isComplete = stageIndex > idx;
+
+          return (
+            <div
+              key={s.id}
+              className={`stage ${isActive ? "active" : ""} ${isComplete ? "complete" : ""}`}
+            >
+              <span className="stage-icon">{s.icon}</span>
+              <span>{s.label}</span>
+              {isActive && <span className="spinner">⏳</span>}
+              {isComplete && <span className="check">✓</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 type TrackingSseEventType = "token" | "done" | "error";
 
 type TrackingSseMetadata = {
@@ -16,7 +291,33 @@ type AgentType = "tracking" | "rates" | "retail" | "faq";
 type TrackingSseEvent = {
   type: TrackingSseEventType;
   content: string;
-  metadata: TrackingSseMetadata;
+  metadata: TrackingSseMetadata & {
+    type?: string;
+    raw_data?: TrackingData;
+    events?: TrackingEvent[];
+    current_status?: string;
+    status_explanation?: string;
+  };
+};
+
+type TrackingEvent = {
+  timestamp: string;
+  location: string;
+  description: string;
+  status: string;
+};
+
+type TrackingData = {
+  awb: string;
+  currentStatus: string;
+  statusExplanation?: string;
+  location: string;
+  lastUpdate: string;
+  origin: string;
+  destination: string;
+  events: TrackingEvent[];
+  serviceType?: string;
+  estimatedDelivery?: string;
 };
 
 type Message = {
@@ -30,6 +331,15 @@ type Message = {
     origin?: string;
     destination?: string;
   };
+  trackingData?: TrackingData;
+  messageType?: "conversational" | "tracking_result" | "error";
+};
+
+type Conversation = {
+  id: string;
+  title: string;
+  lastMessage: string;
+  timestamp: Date;
 };
 
 const CONVERSATION_ID = "demo-conversation";
@@ -42,14 +352,40 @@ export default function HomePage() {
   const [uploadedFileId, setUploadedFileId] = useState<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState(CONVERSATION_ID);
+  const [loadingState, setLoadingState] = useState<"idle" | "searching" | "processing" | "formatting">("idle");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUpload = async (file: File) => {
     setIsUploading(true);
+    
+    // Show initial upload message
+    const uploadMessageId = Date.now().toString();
+    const uploadMessage: Message = {
+      id: uploadMessageId,
+      role: "user",
+      content: `📎 Uploading: ${file.name}`,
+      fileName: file.name,
+    };
+    setMessages((prev) => [...prev, uploadMessage]);
+    
+    // Show loading state
+    setLoadingState("searching");
+    
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("conversationId", CONVERSATION_ID);
+      formData.append("conversationId", currentConversationId);
+
+      // Update message to show processing
+      setMessages((prev) => prev.map(msg => 
+        msg.id === uploadMessageId 
+          ? { ...msg, content: `📎 Image uploaded. Finding AWB number...` }
+          : msg
+      ));
+      setLoadingState("processing");
 
       const response = await fetch("http://localhost:3001/api/upload", {
         method: "POST",
@@ -66,27 +402,64 @@ export default function HomePage() {
         setUploadedFileId(data.object_key);
         setUploadedFileName(file.name);
         
-        // Show upload success message
-        const uploadMessage: Message = {
-          id: Date.now().toString(),
-          role: "user",
-          content: `📎 Uploaded: ${file.name}`,
-          fileId: data.object_key,
-          fileName: file.name,
-          extractedData: data.extracted_data,
-        };
-        setMessages((prev) => [...prev, uploadMessage]);
+        // Update upload message with success
+        setMessages((prev) => prev.map(msg => 
+          msg.id === uploadMessageId 
+            ? { 
+                ...msg, 
+                content: `📎 Uploaded: ${file.name}`,
+                fileId: data.object_key,
+                extractedData: data.extracted_data,
+              }
+            : msg
+        ));
 
-        // If AWB was extracted, show tracking details automatically
+        // If AWB was extracted, show tracking details automatically with structured data
         if (data.extracted_data?.awb) {
+          // Show progressive loading messages
+          setLoadingState("formatting");
+          
+          // Update message to show AWB found
+          setMessages((prev) => prev.map(msg => 
+            msg.id === uploadMessageId 
+              ? { ...msg, content: `📎 Uploaded: ${file.name}\n✅ AWB found: ${data.extracted_data.awb}` }
+              : msg
+          ));
+          
+          // Small delay to show "Fetching tracking data..." message
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          setMessages((prev) => prev.map(msg => 
+            msg.id === uploadMessageId 
+              ? { ...msg, content: `📎 Uploaded: ${file.name}\n✅ AWB found: ${data.extracted_data.awb}\n🔍 Fetching tracking data...` }
+              : msg
+          ));
+          
           if (data.tracking_details) {
-            // Show automatic tracking details
+            // Build structured tracking data from response
+            const trackingData: TrackingData | undefined = data.tracking_data ? {
+              awb: data.tracking_data.awb || data.extracted_data.awb,
+              currentStatus: data.tracking_data.currentStatus || data.tracking_status || "UNKNOWN",
+              statusExplanation: data.tracking_data.statusExplanation || data.tracking_status_explanation,
+              location: data.tracking_data.location || "N/A",
+              lastUpdate: data.tracking_data.lastUpdate || "",
+              origin: data.tracking_data.origin || "N/A",
+              destination: data.tracking_data.destination || "N/A",
+              events: data.tracking_data.events || data.tracking_events || [],
+              serviceType: data.tracking_data.serviceType,
+              estimatedDelivery: data.tracking_data.estimatedDelivery,
+            } : undefined;
+            
+            // Show automatic tracking details with structured data
             const trackingMessage: Message = {
               id: (Date.now() + 1).toString(),
               role: "bot",
               content: data.tracking_details,
+              trackingData: trackingData,
+              messageType: data.tracking_type || (trackingData ? "tracking_result" : "conversational"),
             };
             setMessages((prev) => [...prev, trackingMessage]);
+            setLoadingState("idle");
           } else {
             // Fallback if auto-tracking didn't work
             const awbMessage: Message = {
@@ -95,15 +468,20 @@ export default function HomePage() {
               content: `✅ AWB extracted: ${data.extracted_data.awb}. You can now ask me to track it!`,
             };
             setMessages((prev) => [...prev, awbMessage]);
+            setLoadingState("idle");
           }
+        } else {
+          setLoadingState("idle");
         }
       }
     } catch (error) {
       console.error("Upload error:", error);
+      setLoadingState("idle");
       const errorMessage: Message = {
         id: Date.now().toString(),
         role: "bot",
         content: `❌ Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        messageType: "error",
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
@@ -112,33 +490,52 @@ export default function HomePage() {
   };
 
   const send = async () => {
-    if (!input.trim() && !uploadedFileId) return;
+    // For tracking agent, allow sending with file or text
+    // For other agents, require text input
+    if (selectedAgent === "tracking") {
+      if (!input.trim() && !uploadedFileId) return;
+      
+      // Check if message contains AWB to show loading states
+      const awbMatch = input.match(/\b\d{10,15}\b/);
+      if (awbMatch || uploadedFileId) {
+        setLoadingState("searching");
+        // Simulate progress updates
+        setTimeout(() => setLoadingState("processing"), 1500);
+        setTimeout(() => setLoadingState("formatting"), 3000);
+      }
+    } else {
+      if (!input.trim()) return;
+    }
     if (isSending) return;
     setIsSending(true);
+
+    // Store message content and clear input IMMEDIATELY (before async operations)
+    const messageContent = input || (uploadedFileId && selectedAgent === "tracking" ? "Track this" : "");
+    setInput(""); // Clear input box immediately - user should see it disappear right away
 
     // Add user message
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input || (uploadedFileId ? "Track this" : ""),
-      fileId: uploadedFileId || undefined,
-      fileName: uploadedFileName || undefined,
+      content: messageContent,
+      fileId: selectedAgent === "tracking" ? (uploadedFileId || undefined) : undefined,
+      fileName: selectedAgent === "tracking" ? (uploadedFileName || undefined) : undefined,
     };
     setMessages((prev) => [...prev, userMessage]);
 
     try {
       const response = await fetch(
         `http://localhost:3001/api/messages/${encodeURIComponent(
-          CONVERSATION_ID
+          currentConversationId
         )}/stream`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ 
-            message: input || (uploadedFileId ? "Track this" : ""),
+            message: messageContent, // Use stored message content (input is already cleared)
             selectedAgent: selectedAgent,
-            fileId: uploadedFileId || undefined,
-            fileUrl: uploadedFileId ? undefined : undefined, // Can be set if we have URL
+            fileId: selectedAgent === "tracking" ? (uploadedFileId || undefined) : undefined,
+            fileUrl: selectedAgent === "tracking" && uploadedFileId ? undefined : undefined,
           }),
         }
       );
@@ -182,6 +579,9 @@ export default function HomePage() {
         }
 
         if (event.type === "token") {
+          // Check if this is a tracking result with structured data
+          const hasTrackingData = event.metadata?.raw_data || event.metadata?.events;
+          
           // Update or create bot message
           setMessages((prev) => {
             const lastMessage = prev[prev.length - 1];
@@ -189,7 +589,12 @@ export default function HomePage() {
               // Update existing bot message
               return prev.map((msg, idx) => 
                 idx === prev.length - 1 
-                  ? { ...msg, content: event.content }
+                  ? { 
+                      ...msg, 
+                      content: event.content,
+                      trackingData: event.metadata?.raw_data || msg.trackingData,
+                      messageType: event.metadata?.type || msg.messageType,
+                    }
                   : msg
               );
             } else {
@@ -198,24 +603,40 @@ export default function HomePage() {
                 id: `bot-${Date.now()}`,
                 role: "bot" as const,
                 content: event.content,
+                trackingData: event.metadata?.raw_data,
+                messageType: event.metadata?.type || (hasTrackingData ? "tracking_result" : "conversational"),
               }];
             }
           });
+          
+          // Reset loading state when we get any response
+          if (loadingState !== "idle") {
+            setLoadingState("idle");
+          }
         }
         if (event.type === "error") {
           const errorMessage: Message = {
             id: Date.now().toString(),
             role: "bot",
             content: `❌ Error: ${event.content}`,
+            messageType: "error",
           };
           setMessages((prev) => [...prev, errorMessage]);
+          setLoadingState("idle");
+        }
+        if (event.type === "done") {
+          setLoadingState("idle");
         }
       }
     }
 
-    setInput("");
-    setUploadedFileId(null);
-    setUploadedFileName(null);
+    // Input already cleared at the start of send() function
+    // Only clear file upload if it was used (tracking agent)
+    if (selectedAgent === "tracking") {
+      setUploadedFileId(null);
+      setUploadedFileName(null);
+    }
+    setLoadingState("idle");
     setIsSending(false);
     } catch (error) {
       console.error("Fetch error:", error);
@@ -225,272 +646,337 @@ export default function HomePage() {
         content: `❌ Error: ${error instanceof Error 
           ? error.message 
           : "Failed to connect to gateway. Make sure the gateway is running on http://localhost:3001"}`,
+        messageType: "error",
       };
       setMessages((prev) => [...prev, errorMessage]);
+      setLoadingState("idle");
       setIsSending(false);
     }
   };
 
+  const createNewConversation = () => {
+    const newId = `conv-${Date.now()}`;
+    setCurrentConversationId(newId);
+    setMessages([]);
+    setUploadedFileId(null);
+    setUploadedFileName(null);
+  };
+
   return (
-    <div className="app-shell">
-      <section className="chat-card">
-        <header className="chat-header">
-          <div className="chat-title">
-            <span className="chat-title-main">SMSA AI Assistant</span>
-            <span className="chat-title-sub">
-              Track your shipment in real time using your AWB.
-            </span>
+    <div className="app-container">
+      {/* Sidebar */}
+      <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`}>
+        <div className="sidebar-header">
+          <button
+            type="button"
+            onClick={createNewConversation}
+            className="new-chat-btn"
+          >
+            <span>+</span> New Chat
+          </button>
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="sidebar-toggle"
+            aria-label="Toggle sidebar"
+          >
+            {sidebarOpen ? "←" : "→"}
+          </button>
+        </div>
+        <div className="conversations-list">
+          {conversations.length === 0 ? (
+            <div className="empty-conversations">
+              <p>No conversations yet</p>
+              <p className="hint">Start a new chat to begin</p>
+            </div>
+          ) : (
+            conversations.map((conv) => (
+              <button
+                key={conv.id}
+                type="button"
+                className={`conversation-item ${
+                  currentConversationId === conv.id ? "active" : ""
+                }`}
+                onClick={() => {
+                  setCurrentConversationId(conv.id);
+                  // Load conversation messages here
+                }}
+              >
+                <span className="conv-title">{conv.title}</span>
+                <span className="conv-time">
+                  {conv.timestamp.toLocaleDateString()}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="main-content">
+        <header className="main-header">
+          <div className="header-left">
+            <h1 className="logo">SMSA Express</h1>
+            <span className="tagline">AI-Powered Logistics Intelligence</span>
           </div>
-          <span className="chat-badge">
-            {selectedAgent === "tracking" && "Tracking agent • Online"}
-            {selectedAgent === "rates" && "Rates agent • Online"}
-            {selectedAgent === "retail" && "Retail centers agent • Online"}
-            {selectedAgent === "faq" && "FAQ agent • Online"}
-          </span>
+          <div className="header-right">
+            <div className="status-indicator">
+              <span className="status-dot"></span>
+              <span>AI Assistant Online</span>
+            </div>
+          </div>
         </header>
 
-        <div className="chat-body">
-          {/* Agent Selection */}
-          <div className="agent-selector" style={{ 
-            marginBottom: "1rem", 
-            padding: "0.75rem",
-            background: "rgba(255, 255, 255, 0.05)",
-            borderRadius: "8px",
-            display: "flex",
-            gap: "0.5rem",
-            flexWrap: "wrap"
-          }}>
-            <label style={{ color: "#fff", fontSize: "0.875rem", alignSelf: "center" }}>
-              Select Agent:
-            </label>
-            <button
-              type="button"
-              onClick={() => setSelectedAgent("tracking")}
-              style={{
-                padding: "0.5rem 1rem",
-                borderRadius: "6px",
-                border: "none",
-                background: selectedAgent === "tracking" ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                fontWeight: selectedAgent === "tracking" ? "600" : "400",
-              }}
-            >
-              📦 Tracking
-            </button>
-            <button
-              type="button"
-              onClick={() => setSelectedAgent("rates")}
-              style={{
-                padding: "0.5rem 1rem",
-                borderRadius: "6px",
-                border: "none",
-                background: selectedAgent === "rates" ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                fontWeight: selectedAgent === "rates" ? "600" : "400",
-              }}
-            >
-              💰 Rates
-            </button>
-            <button
-              type="button"
-              onClick={() => setSelectedAgent("retail")}
-              style={{
-                padding: "0.5rem 1rem",
-                borderRadius: "6px",
-                border: "none",
-                background: selectedAgent === "retail" ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                fontWeight: selectedAgent === "retail" ? "600" : "400",
-              }}
-            >
-              📍 Retail Centers
-            </button>
-            <button
-              type="button"
-              onClick={() => setSelectedAgent("faq")}
-              style={{
-                padding: "0.5rem 1rem",
-                borderRadius: "6px",
-                border: "none",
-                background: selectedAgent === "faq" ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: "0.875rem",
-                fontWeight: selectedAgent === "faq" ? "600" : "400",
-              }}
-            >
-              ❓ FAQ
-            </button>
-          </div>
-
-          <p className="chat-hint">
-            {selectedAgent === "tracking" && (
-              <>Try: <strong>track AWB 227047923763</strong> or paste any valid AWB number.</>
-            )}
-            {selectedAgent === "rates" && (
-              <>Try: <strong>What's the rate from Riyadh to Jeddah for 5kg?</strong></>
-            )}
-            {selectedAgent === "retail" && (
-              <>Try: <strong>Find retail centers in Riyadh</strong></>
-            )}
-            {selectedAgent === "faq" && (
-              <>Ask: <strong>How do I track my shipment?</strong></>
-            )}
-          </p>
-
-          <div className="chat-messages">
-            {messages.length === 0 && (
-              <div className="chat-message bot">
-                {selectedAgent === "tracking" && "Hi, I can help you track your SMSA shipment. Share your AWB number or upload a waybill image to see the latest status."}
-                {selectedAgent === "rates" && "Hi, I can help you get shipping rates. Tell me the origin, destination, weight, and number of pieces."}
-                {selectedAgent === "retail" && "Hi, I can help you find SMSA retail centers. Tell me the city or area you're looking for."}
-                {selectedAgent === "faq" && "Hi, I can answer your questions about SMSA services. What would you like to know?"}
-              </div>
-            )}
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={`chat-message ${m.role}`}
+        <div className="chat-container">
+          {/* Agent Selector */}
+          <div className="agent-selector-container">
+            <div className="agent-tabs">
+              <button
+                type="button"
+                className={`agent-tab ${selectedAgent === "tracking" ? "active" : ""}`}
+                onClick={() => {
+                  const prevAgent = selectedAgent;
+                  setSelectedAgent("tracking");
+                  // Clear messages and file when switching from other agents
+                  if (prevAgent !== "tracking") {
+                    setMessages([]);
+                    setUploadedFileId(null);
+                    setUploadedFileName(null);
+                  }
+                }}
               >
-                {m.fileId && (
-                  <div style={{ 
-                    marginBottom: "4px", 
-                    fontSize: "11px", 
-                    opacity: 0.8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px"
-                  }}>
-                    📎 {m.fileName || "Uploaded file"}
-                    {m.extractedData?.awb && (
-                      <span style={{ marginLeft: "8px", color: "#10b981" }}>
-                        (AWB: {m.extractedData.awb})
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-              </div>
-            ))}
+                <span>📦</span> Tracking
+              </button>
+              <button
+                type="button"
+                className={`agent-tab ${selectedAgent === "rates" ? "active" : ""}`}
+                onClick={() => {
+                  const prevAgent = selectedAgent;
+                  setSelectedAgent("rates");
+                  // Clear messages and file when switching agents
+                  if (prevAgent !== "rates") {
+                    setMessages([]);
+                    setUploadedFileId(null);
+                    setUploadedFileName(null);
+                  }
+                }}
+              >
+                <span>💰</span> Rates
+              </button>
+              <button
+                type="button"
+                className={`agent-tab ${selectedAgent === "retail" ? "active" : ""}`}
+                onClick={() => {
+                  const prevAgent = selectedAgent;
+                  setSelectedAgent("retail");
+                  // Clear messages and file when switching agents
+                  if (prevAgent !== "retail") {
+                    setMessages([]);
+                    setUploadedFileId(null);
+                    setUploadedFileName(null);
+                  }
+                }}
+              >
+                <span>📍</span> Retail Centers
+              </button>
+              <button
+                type="button"
+                className={`agent-tab ${selectedAgent === "faq" ? "active" : ""}`}
+                onClick={() => {
+                  const prevAgent = selectedAgent;
+                  setSelectedAgent("faq");
+                  // Clear messages and file when switching agents
+                  if (prevAgent !== "faq") {
+                    setMessages([]);
+                    setUploadedFileId(null);
+                    setUploadedFileName(null);
+                  }
+                }}
+              >
+                <span>❓</span> FAQ
+              </button>
+            </div>
           </div>
-        </div>
 
-        <footer className="chat-footer">
-          {/* File Upload Section */}
-          <div style={{ 
-            marginBottom: "8px", 
-            display: "flex", 
-            alignItems: "center", 
-            gap: "8px",
-            fontSize: "12px"
-          }}>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) {
-                  handleFileUpload(file);
-                }
-                // Reset input
-                if (fileInputRef.current) {
-                  fileInputRef.current.value = "";
-                }
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
-              style={{
-                padding: "6px 12px",
-                borderRadius: "6px",
-                border: "1px solid rgba(55, 65, 81, 0.9)",
-                background: "rgba(15, 23, 42, 0.9)",
-                color: "#e5e7eb",
-                fontSize: "12px",
-                cursor: isUploading ? "not-allowed" : "pointer",
-                opacity: isUploading ? 0.6 : 1,
-                display: "flex",
-                alignItems: "center",
-                gap: "4px",
-              }}
-            >
-              {isUploading ? "⏳ Uploading..." : "📎 Upload"}
-            </button>
-            {uploadedFileId && (
-              <span style={{ 
-                color: "#10b981", 
-                fontSize: "11px",
-                display: "flex",
-                alignItems: "center",
-                gap: "4px"
-              }}>
-                ✓ {uploadedFileName}
+          {/* Chat Messages */}
+          <div className="messages-container">
+            {messages.length === 0 && (
+              <div className="welcome-message">
+                <div className="welcome-content">
+                  {selectedAgent === "tracking" && (
+                    <>
+                      <h2>Track Your Shipment</h2>
+                      <p>Enter AWB number or upload waybill for instant tracking</p>
+                    </>
+                  )}
+                  {selectedAgent === "rates" && (
+                    <>
+                      <h2>Get Shipping Rates</h2>
+                      <p>Tell me origin, destination, weight, and number of pieces</p>
+                    </>
+                  )}
+                  {selectedAgent === "retail" && (
+                    <>
+                      <h2>Find Retail Centers</h2>
+                      <p>Tell me the city or area you're looking for</p>
+                    </>
+                  )}
+                  {selectedAgent === "faq" && (
+                    <>
+                      <h2>How Can I Help?</h2>
+                      <p>Ask me anything about SMSA services</p>
+                    </>
+                  )}
+                </div>
+                <div className="example-hints">
+                  {selectedAgent === "tracking" && (
+                    <button
+                      type="button"
+                      className="example-btn"
+                      onClick={() => setInput("track AWB 227047923763")}
+                    >
+                      track AWB 227047923763
+                    </button>
+                  )}
+                  {selectedAgent === "rates" && (
+                    <button
+                      type="button"
+                      className="example-btn"
+                      onClick={() => setInput("What's the rate from Riyadh to Jeddah for 5kg?")}
+                    >
+                      Rate from Riyadh to Jeddah, 5kg
+                    </button>
+                  )}
+                  {selectedAgent === "retail" && (
+                    <button
+                      type="button"
+                      className="example-btn"
+                      onClick={() => setInput("Find retail centers in Riyadh")}
+                    >
+                      Find centers in Riyadh
+                    </button>
+                  )}
+                  {selectedAgent === "faq" && (
+                    <button
+                      type="button"
+                      className="example-btn"
+                      onClick={() => setInput("How do I track my shipment?")}
+                    >
+                      How do I track my shipment?
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            <div className="messages-list">
+              {messages.map((m) => (
+                <div key={m.id} className={`message-bubble ${m.role}`}>
+                  {m.fileId && (
+                    <div className="file-attachment">
+                      <span>📎</span> {m.fileName || "Uploaded file"}
+                      {m.extractedData?.awb && (
+                        <span className="awb-badge">AWB: {m.extractedData.awb}</span>
+                      )}
+                    </div>
+                  )}
+                  {m.messageType === "tracking_result" && m.trackingData ? (
+                    <TrackingMessage data={m.trackingData} content={cleanReasoningContent(m.content)} />
+                  ) : (
+                    <div 
+                      className="message-content"
+                      dangerouslySetInnerHTML={{ 
+                        __html: renderMarkdown(cleanReasoningContent(m.content)) 
+                      }}
+                    />
+                  )}
+                </div>
+              ))}
+              {loadingState !== "idle" && selectedAgent === "tracking" && (
+                <TrackingLoadingState stage={loadingState} />
+              )}
+            </div>
+          </div>
+
+          {/* Input Area */}
+          <div className="input-area">
+            {uploadedFileId && selectedAgent === "tracking" && (
+              <div className="uploaded-file-info">
+                <span className="file-name">✓ {uploadedFileName}</span>
                 <button
                   type="button"
+                  className="remove-file"
                   onClick={() => {
                     setUploadedFileId(null);
                     setUploadedFileName(null);
                   }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "#ef4444",
-                    cursor: "pointer",
-                    fontSize: "12px",
-                    padding: "0 4px",
-                  }}
                 >
-                 
+                  ×
                 </button>
-              </span>
+              </div>
             )}
-          </div>
-
-          <div className="chat-input-row">
-            <input
-              className="chat-input"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
+            <div className="input-container">
+              {selectedAgent === "tracking" && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        handleFileUpload(file);
+                      }
+                      if (fileInputRef.current) {
+                        fileInputRef.current.value = "";
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="upload-btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    title="Upload waybill image"
+                  >
+                    {isUploading ? "⏳" : "📎"}
+                  </button>
+                </>
+              )}
+              <input
+                className="message-input"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+                placeholder={
+                  uploadedFileId && selectedAgent === "tracking"
+                    ? "Ask about the uploaded file..."
+                    : selectedAgent === "tracking"
+                    ? "Enter AWB number or upload waybill image"
+                    : selectedAgent === "rates"
+                    ? "e.g. Rate from Riyadh to Jeddah, 5kg"
+                    : selectedAgent === "retail"
+                    ? "e.g. Find centers in Riyadh"
+                    : "Ask your question..."
                 }
-              }}
-              placeholder={
-                uploadedFileId 
-                  ? "Ask about the uploaded file or type a message..."
-                  : selectedAgent === "tracking" 
-                    ? "Enter AWB, e.g. 227047923763 or upload waybill image" 
-                    : selectedAgent === "rates" 
-                      ? "e.g. Rate from Riyadh to Jeddah, 5kg" 
-                      : selectedAgent === "retail" 
-                        ? "e.g. Find centers in Riyadh" 
-                        : "Ask your question..."
-              }
-            />
-            <button
-              type="button"
-              onClick={send}
-              disabled={isSending || (!input.trim() && !uploadedFileId)}
-              className="chat-send-btn"
-            >
-              <span>{isSending ? "Sending..." : "Send"}</span>
-              <span className="chat-send-icon">➤</span>
-            </button>
+              />
+              <button
+                type="button"
+                className="send-btn"
+                onClick={send}
+                disabled={isSending || (!input.trim() && (selectedAgent !== "tracking" || !uploadedFileId))}
+              >
+                {isSending ? "..." : "→"}
+              </button>
+            </div>
           </div>
-        </footer>
-      </section>
+        </div>
+      </main>
     </div>
   );
 }

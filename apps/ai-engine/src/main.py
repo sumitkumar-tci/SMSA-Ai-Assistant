@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict
 from uuid import uuid4
@@ -28,20 +29,39 @@ async def _stream_tracking_response(
     """
     Wraps the orchestrator response in a text/event-stream compatible generator.
     """
+    # Validate file upload: only allow for tracking agent
+    file_id = None
+    file_url = None
+    if body.file_id or body.file_url:
+        if body.selected_agent == "tracking":
+            file_id = body.file_id
+            file_url = body.file_url
+        else:
+            # Log warning if file provided for non-tracking agent
+            logger.warning(
+                "file_upload_for_non_tracking_agent",
+                selected_agent=body.selected_agent,
+                file_id=body.file_id,
+            )
+            # Ignore file for non-tracking agents
+
     context: Dict[str, Any] = {
         "conversation_id": body.conversation_id,
         "user_id": body.user_id,
         "message": body.message,
         "explicit_intent": body.explicit_intent,
         "selected_agent": body.selected_agent,
-        "file_id": body.file_id,
-        "file_url": body.file_url,
+        "file_id": file_id,
+        "file_url": file_url,
     }
 
     result = await route_message(context)
 
     # Get agent name from result, default to "tracking" for backwards compatibility
     agent_name = result.get("agent", "tracking")
+    
+    # Extract metadata (may contain structured data like tracking events)
+    result_metadata = result.get("metadata", {})
 
     metadata = TrackingSseMetadata(
         agent=agent_name,  # type: ignore[arg-type]
@@ -49,13 +69,23 @@ async def _stream_tracking_response(
         conversationId=body.conversation_id,  # type: ignore[call-arg]
     )
 
-    # Single token event with the full message content for now
+    # Single token event with the full message content
+    # Include structured data in metadata for frontend rendering
     token_event = TrackingSseEvent(
         type="token",
         content=result.get("content", ""),
         metadata=metadata,
     )
-    yield f"data: {token_event.model_dump_json(by_alias=True)}\n\n".encode("utf-8")
+    
+    # Add structured data to the event (for tracking events, etc.)
+    event_dict = token_event.model_dump_json(by_alias=True)
+    event_json = json.loads(event_dict)
+    
+    # Merge structured data from result metadata into event
+    if result_metadata:
+        event_json["metadata"] = {**event_json.get("metadata", {}), **result_metadata}
+    
+    yield f"data: {json.dumps(event_json)}\n\n".encode("utf-8")
 
     # Done event
     done_event = TrackingSseEvent(
@@ -185,7 +215,7 @@ async def upload_file(
         if extracted_data:
             response_data["extracted_data"] = extracted_data
             
-            # If AWB was extracted, automatically track it and include tracking details
+            # If AWB was extracted, automatically track it and include tracking details with structured data
             if extracted_data.get("awb"):
                 try:
                     from .agents.tracking import SMSAAIAssistantTrackingAgent
@@ -200,9 +230,23 @@ async def upload_file(
                         },
                     )
                     
-                    # Add tracking details to response
-                    if tracking_result and tracking_result.get("content"):
-                        response_data["tracking_details"] = tracking_result["content"]
+                    # Add tracking details to response (both conversational and structured data)
+                    if tracking_result:
+                        if tracking_result.get("content"):
+                            response_data["tracking_details"] = tracking_result["content"]
+                        
+                        # Include structured data for frontend timeline UI
+                        if tracking_result.get("raw_data"):
+                            response_data["tracking_data"] = tracking_result["raw_data"]
+                        if tracking_result.get("events"):
+                            response_data["tracking_events"] = tracking_result["events"]
+                        if tracking_result.get("current_status"):
+                            response_data["tracking_status"] = tracking_result["current_status"]
+                        if tracking_result.get("status_explanation"):
+                            response_data["tracking_status_explanation"] = tracking_result["status_explanation"]
+                        if tracking_result.get("type"):
+                            response_data["tracking_type"] = tracking_result["type"]
+                        
                         logger.info("auto_tracked_from_vision", awb=awb)
                 except Exception as auto_track_error:
                     logger.warning("auto_track_failed", error=str(auto_track_error), exc_info=True)
