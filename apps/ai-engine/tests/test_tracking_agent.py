@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
-from src.agents.tracking import TrackingAgent
+from src.agents.tracking import SMSAAIAssistantTrackingAgent
 
 
 def test_tracking_agent_extracts_awb_and_returns_content() -> None:
-    agent = TrackingAgent()
+    agent = SMSAAIAssistantTrackingAgent()
     ctx = {"message": "Please track AWB 227047923763"}
 
     async def _run():

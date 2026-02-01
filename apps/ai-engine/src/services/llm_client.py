@@ -13,11 +13,12 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import aiohttp
 
 from ..config.settings import get_settings
+from ..logging_config import logger
 
 settings = get_settings()
 
 
-class LLMClient:
+class SMSAAIAssistantLLMClient:
     """
     Client for interacting with Qwen text model via Huawei Cloud ModelArts.
 
@@ -45,6 +46,10 @@ class LLMClient:
         self.api_url = api_url or settings.llm_text_api_url
         self.model = model or settings.llm_text_model
         self.api_key = api_key or settings.llm_api_key
+        
+        # Validate API key is set
+        if not self.api_key:
+            logger.warning("llm_api_key_not_set", message="LLM API key is empty. Check .env file.")
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -92,8 +97,11 @@ class LLMClient:
             "messages": payload_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": stream,
         }
+        
+        # Only include 'stream' if it's True (Huawei API doesn't accept stream: false)
+        if stream:
+            payload["stream"] = True
 
         headers = {
             "Content-Type": "application/json",
@@ -112,10 +120,37 @@ class LLMClient:
         headers: Dict[str, str],
     ) -> Dict[str, Any]:
         """Handle non-streaming completion."""
+        # Remove 'stream' field for non-streaming requests (Huawei API might not accept it)
+        payload_clean = payload.copy()
+        if not payload.get("stream", False):
+            payload_clean.pop("stream", None)
+        
+        logger.debug(
+            "llm_request",
+            url=self.api_url,
+            model=self.model,
+            messages_count=len(payload_clean.get("messages", [])),
+        )
+        
         async with session.post(
-            self.api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=60)
+            self.api_url, json=payload_clean, headers=headers, timeout=aiohttp.ClientTimeout(total=60)
         ) as response:
-            response.raise_for_status()
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(
+                    "llm_api_error",
+                    status=response.status,
+                    error=error_text[:500],  # Limit error text length
+                    url=self.api_url,
+                    model=self.model,
+                )
+                raise aiohttp.ClientResponseError(
+                    request_info=response.request_info,
+                    history=response.history,
+                    status=response.status,
+                    message=f"LLM API error ({response.status}): {error_text[:200]}",
+                )
+            
             data = await response.json()
 
             # Extract content from response

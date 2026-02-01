@@ -13,21 +13,21 @@ from ..models.tracking import TrackingCheckpoint, TrackingResult, TrackingStatus
 from ..config.settings import settings
 
 
-class SMSATrackingClientConfig(BaseModel):
+class SMSAAIAssistantSMSATrackingClientConfig(BaseModel):
     username: str
     password: str
     base_url: str
 
 
-class SMSATrackingClient:
+class SMSAAIAssistantSMSATrackingClient:
     """
     Async client for SMSA Tracking SOAP API using the credentials and payload
     structure provided in the project reference.
     """
 
-    def __init__(self, config: Optional[SMSATrackingClientConfig] = None) -> None:
+    def __init__(self, config: Optional[SMSAAIAssistantSMSATrackingClientConfig] = None) -> None:
         if config is None:
-            config = SMSATrackingClientConfig(
+            config = SMSAAIAssistantSMSATrackingClientConfig(
                 username=settings.smsa_tracking_username,
                 password=settings.smsa_tracking_password,
                 base_url=settings.smsa_tracking_base_url,
@@ -347,7 +347,7 @@ class SMSATrackingClient:
         return await asyncio.gather(*tasks)
 
 
-class SMSARatesClient:
+class SMSAAIAssistantSMSARatesClient:
     """
     Async client for SMSA Rates Inquiry REST API.
 
@@ -463,4 +463,133 @@ class SMSARatesClient:
                 error_code="PARSE_ERROR",
                 error_message=f"Failed to parse SMSA rates response: {e}",
             ).model_dump(by_alias=True)
+
+
+class SMSAAIAssistantSMSARetailCentersClient:
+    """
+    Async client for SMSA Retail Centers / Service Centers API.
+
+    Endpoint: https://mobileapi.smsaexpress.com/smsamobilepro/retailcenter.asmx
+    This appears to be a SOAP service (based on .asmx extension).
+    Passkey: rcai$ervice
+    """
+
+    def __init__(self) -> None:
+        self._base_url = settings.smsa_retail_base_url
+        self._passkey = settings.smsa_retail_passkey
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(connect=5, total=30)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def _post_soap(
+        self, action: str, envelope: str
+    ) -> str:
+        """Post SOAP envelope to the retail centers endpoint."""
+        session = await self._get_session()
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": action,
+        }
+        async with session.post(
+            self._base_url,
+            data=envelope.encode("utf-8"),
+            headers=headers,
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+
+    async def get_retail_centers(
+        self,
+        city: Optional[str] = None,
+        country: str = "SA",
+    ) -> Dict[str, Any]:
+        """
+        Get retail/service centers from SMSA API.
+
+        Args:
+            city: City name (e.g., "Riyadh", "Jeddah") - optional, returns all if not specified
+            country: Country code (default: "SA")
+
+        Returns:
+            Dict with success, centers list, and error info if any.
+        """
+        # TODO: Get exact SOAP structure from SMSA API documentation
+        # For now, implementing a basic structure that can be updated
+        # Based on typical SOAP patterns and the tracking API structure
+
+        # Build SOAP envelope
+        # Note: This is a placeholder - actual structure needs to be confirmed
+        soap_action = "http://tempuri.org/GetRetailCenters"  # Placeholder action
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <tem:GetRetailCenters>
+      <tem:Country>{country}</tem:Country>
+      {f'<tem:City>{city}</tem:City>' if city else ''}
+      <tem:Passkey>{self._passkey}</tem:Passkey>
+    </tem:GetRetailCenters>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+        try:
+            xml_text = await self._post_soap(soap_action, envelope)
+            
+            # Parse XML response
+            parsed = xmltodict.parse(xml_text)
+            
+            # Navigate through SOAP envelope structure
+            body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
+            response = body.get("GetRetailCentersResponse", {})
+            result = response.get("GetRetailCentersResult", {})
+            
+            # Extract centers (structure may vary)
+            centers = []
+            if isinstance(result, dict):
+                # Try different possible structures
+                center_list = result.get("RetailCenter") or result.get("Centers") or result.get("Data", [])
+                if not isinstance(center_list, list):
+                    center_list = [center_list] if center_list else []
+                
+                for center in center_list:
+                    if isinstance(center, dict):
+                        centers.append({
+                            "name": center.get("Name") or center.get("OfficeName") or "SMSA Service Center",
+                            "address": center.get("Address") or center.get("FullAddress") or "N/A",
+                            "city": center.get("City") or city or "N/A",
+                            "phone": center.get("Phone") or center.get("ContactNumber") or "N/A",
+                            "hours": center.get("Hours") or center.get("WorkingHours") or "N/A",
+                            "latitude": center.get("Latitude") or center.get("Lat"),
+                            "longitude": center.get("Longitude") or center.get("Lng"),
+                        })
+            
+            return {
+                "success": True,
+                "centers": centers,
+                "count": len(centers),
+            }
+
+        except aiohttp.ClientError as e:
+            return {
+                "success": False,
+                "error_code": "NETWORK_ERROR",
+                "error_message": f"Failed to connect to SMSA retail centers API: {e}",
+                "centers": [],
+            }
+        except Exception as e:
+            # If SOAP structure is wrong, return a helpful error
+            return {
+                "success": False,
+                "error_code": "API_ERROR",
+                "error_message": f"SMSA retail centers API error: {e}. Note: SOAP structure may need to be confirmed with SMSA API documentation.",
+                "centers": [],
+            }
 

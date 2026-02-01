@@ -19,9 +19,20 @@ venv/
 
 # Environment & config
 .env
+.env.*
+.env.local
 .env.*.local
+*.env
 .DS_Store
 Thumbs.db
+
+# Credentials & secrets
+*credentials*
+*secrets*
+*.key
+*.pem
+*.p12
+config.local.*
 
 # Logs
 logs/

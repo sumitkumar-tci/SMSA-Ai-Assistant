@@ -7,6 +7,8 @@ type ChatMessageRequest = {
   message: string;
   explicitIntent?: "TRACKING" | "RATES" | "LOCATIONS" | "FAQ";
   selectedAgent?: "tracking" | "rates" | "retail" | "faq";
+  fileId?: string;
+  fileUrl?: string;
 };
 
 type TrackingSseEventType = "token" | "done" | "error";

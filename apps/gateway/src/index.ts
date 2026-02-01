@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { router as chatRouter } from "./routes/chat";
+import { router as uploadRouter } from "./routes/upload";
 import { logger } from "./logger";
 
 const app = express();
@@ -16,6 +17,7 @@ app.use(
 );
 
 app.use("/api", chatRouter);
+app.use("/api", uploadRouter);
 
 const port = process.env.PORT ?? 3001;
 

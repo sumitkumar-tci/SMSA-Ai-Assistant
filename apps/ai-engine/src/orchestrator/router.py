@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .graph import OrchestratorGraph
+from .graph import SMSAAIAssistantOrchestratorGraph
 
 # Initialize the LangGraph orchestrator
-_orchestrator_graph = OrchestratorGraph()
+_orchestrator_graph = SMSAAIAssistantOrchestratorGraph()
 
 
 async def route_message(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -20,7 +20,7 @@ async def route_message(context: Dict[str, Any]) -> Dict[str, Any]:
     Route a message through the LangGraph orchestrator.
 
     This is the main entrypoint used by the FastAPI route.
-    It converts the context dict to OrchestratorState, runs the graph,
+    It converts the context dict to SMSAAIAssistantOrchestratorState, runs the graph,
     and returns a compatible response dict.
 
     Args:
@@ -29,13 +29,15 @@ async def route_message(context: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dict with 'agent', 'content', and optional 'metadata'
     """
-    # Convert context to OrchestratorState format
+    # Convert context to SMSAAIAssistantOrchestratorState format
     initial_state = {
         "message": context.get("message", ""),
         "conversation_id": context.get("conversation_id", "default"),
         "user_id": context.get("user_id"),
         "selected_agent": context.get("selected_agent"),
         "explicit_intent": context.get("explicit_intent"),
+        "file_id": context.get("file_id"),
+        "file_url": context.get("file_url"),
     }
 
     # Run the LangGraph workflow

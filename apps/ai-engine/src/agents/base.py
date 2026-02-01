@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-class BaseAgent(ABC):
+class SMSAAIAssistantBaseAgent(ABC):
     """
     Abstract base class for all agents.
 

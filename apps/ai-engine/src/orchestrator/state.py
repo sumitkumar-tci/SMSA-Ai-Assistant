@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from .intent_classifier import Intent
 
 
-class OrchestratorState(BaseModel):
+class SMSAAIAssistantOrchestratorState(BaseModel):
     """
     State model for the LangGraph orchestrator workflow.
 
@@ -32,6 +32,8 @@ class OrchestratorState(BaseModel):
     explicit_intent: Optional[Intent] = Field(
         None, description="Explicit intent if provided in request"
     )
+    file_id: Optional[str] = Field(None, description="OBS object key for uploaded file")
+    file_url: Optional[str] = Field(None, description="Direct file URL")
 
     # Classification
     intent: Optional[Intent] = Field(

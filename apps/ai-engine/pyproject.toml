@@ -12,6 +12,8 @@ dependencies = [
   "langgraph>=0.1.0",
   "langchain-core>=0.2.0",
   "motor>=3.3.0",
+  "esdk-obs-python>=3.24.0",
+  "python-multipart>=0.0.6",
 ]
 
 [build-system]

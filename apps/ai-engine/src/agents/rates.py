@@ -4,11 +4,12 @@ import re
 from typing import Any, Dict
 
 from ..logging_config import logger
-from ..services.smsa_apis import SMSARatesClient
-from .base import BaseAgent
+from ..services.smsa_apis import SMSAAIAssistantSMSARatesClient
+from ..services.llm_client import SMSAAIAssistantLLMClient
+from .base import SMSAAIAssistantBaseAgent
 
 
-class RatesAgent(BaseAgent):
+class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
     """
     Agent responsible for shipping rate inquiries.
 
@@ -19,7 +20,8 @@ class RatesAgent(BaseAgent):
     name = "rates"
 
     def __init__(self) -> None:
-        self._client = SMSARatesClient()
+        self._client = SMSAAIAssistantSMSARatesClient()
+        self._llm_client = SMSAAIAssistantLLMClient()
 
     def _extract_rate_params(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -137,14 +139,48 @@ class RatesAgent(BaseAgent):
             service_type=rate_params["service_type"],
         )
 
-        # Format response
-        content = self._format_rate_response(result)
-
         logger.info(
             "rates_response",
             success=result.get("success"),
             rates_count=len(result.get("rates", [])),
         )
+
+        # Use LLM to generate user-friendly response
+        system_prompt = """You are a helpful AI assistant for SMSA Express shipping rates.
+Generate a SHORT, concise response (2-3 sentences max) about shipping rates.
+If rates are available, list them briefly. If no rates, say "No rates available for this route" and suggest trying different cities or weights.
+Be direct and helpful, avoid long explanations."""
+
+        import json
+        user_message = f"""User asked: {message}
+
+Rate inquiry parameters:
+- From: {rate_params['origin_city']}, {rate_params['from_country']}
+- To: {rate_params['destination_city']}, {rate_params['to_country']}
+- Weight: {rate_params['weight']} kg
+- Pieces: {rate_params['pieces']}
+
+Rate data from SMSA API:
+{json.dumps(result, indent=2)}
+
+Generate a helpful response about the shipping rates."""
+
+        try:
+            llm_response = await self._llm_client.chat_completion(
+                messages=[{"role": "user", "content": user_message}],
+                system_prompt=system_prompt,
+                temperature=0.7,
+                max_tokens=200,  # Shorter responses
+            )
+            content = llm_response.get("content", "").strip()
+            
+            if not content:
+                # Fallback to formatted response
+                content = self._format_rate_response(result)
+        except Exception as e:
+            logger.warning("llm_response_failed", error=str(e))
+            # Fallback to formatted response
+            content = self._format_rate_response(result)
 
         return {
             "agent": self.name,

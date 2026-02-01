@@ -15,6 +15,7 @@ src/orchestrator/router.py
 src/orchestrator/state.py
 src/services/db.py
 src/services/deepseek_intent.py
+src/services/faq_data.py
 src/services/llm_client.py
 src/services/response_generator.py
 src/services/smsa_apis.py

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-class ResponseGenerator:
+class SMSAAIAssistantResponseGenerator:
     """
     Centralized response formatter for all agents.
 

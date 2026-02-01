@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-class DeepseekIntentClient:
+class SMSAAIAssistantDeepseekIntentClient:
     """
     Placeholder client for Deepseek-based intent classification.
 

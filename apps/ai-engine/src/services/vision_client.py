@@ -19,7 +19,7 @@ from ..config.settings import get_settings
 settings = get_settings()
 
 
-class VisionClient:
+class SMSAAIAssistantVisionClient:
     """
     Client for interacting with Qwen-VL vision model via Huawei Cloud ModelArts.
 

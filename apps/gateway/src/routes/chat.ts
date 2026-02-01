@@ -8,6 +8,8 @@ type ChatMessageRequest = {
   message: string;
   explicitIntent?: "TRACKING" | "RATES" | "LOCATIONS" | "FAQ";
   selectedAgent?: "tracking" | "rates" | "retail" | "faq";
+  fileId?: string;
+  fileUrl?: string;
 };
 
 type TrackingSseEventType = "token" | "done" | "error";
@@ -36,6 +38,8 @@ router.post(
       message: req.body?.message ?? "",
       selectedAgent: req.body?.selectedAgent,
       explicitIntent: req.body?.explicitIntent,
+      fileId: req.body?.fileId,
+      fileUrl: req.body?.fileUrl,
     };
 
     res.writeHead(200, {

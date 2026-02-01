@@ -18,7 +18,7 @@ from ..config.settings import get_settings
 settings = get_settings()
 
 
-class DatabaseManager:
+class SMSAAIAssistantDatabaseManager:
     """
     Database manager for MongoDB/DDS operations.
 

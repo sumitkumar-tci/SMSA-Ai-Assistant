@@ -16,6 +16,8 @@ class ChatMessageRequest(BaseModel):
     selected_agent: Optional[Literal["tracking", "rates", "retail", "faq"]] = Field(
         default=None, alias="selectedAgent"
     )
+    file_id: Optional[str] = Field(default=None, alias="fileId")  # OBS object key for uploaded file
+    file_url: Optional[str] = Field(default=None, alias="fileUrl")  # Direct file URL
 
 
 class TrackingRequestPayload(BaseModel):
