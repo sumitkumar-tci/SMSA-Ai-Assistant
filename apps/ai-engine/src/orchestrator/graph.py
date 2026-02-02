@@ -252,6 +252,15 @@ class SMSAAIAssistantOrchestratorGraph:
                 metadata["status_explanation"] = state.agent_response["status_explanation"]
             if "requires_awb" in state.agent_response:
                 metadata["requires_awb"] = state.agent_response["requires_awb"]
+            # Retail centers data
+            if "centers" in state.agent_response:
+                metadata["centers"] = state.agent_response["centers"]
+            if "location_info" in state.agent_response:
+                metadata["location_info"] = state.agent_response["location_info"]
+            if "city" in state.agent_response:
+                metadata["city"] = state.agent_response["city"]
+            if "needs_clarification" in state.agent_response:
+                metadata["needs_clarification"] = state.agent_response["needs_clarification"]
 
         return {
             "content": content,

@@ -60,11 +60,22 @@ async def _stream_tracking_response(
     # Get agent name from result, default to "tracking" for backwards compatibility
     agent_name = result.get("agent", "tracking")
     
+    # Normalize agent name to match TrackingSseMetadata expected values
+    # Map internal agent names to frontend-expected names
+    agent_name_map = {
+        "retail_centers": "retail",
+        "tracking": "tracking",
+        "rates": "rates",
+        "faq": "faq",
+        "system": "system",
+    }
+    normalized_agent_name = agent_name_map.get(agent_name, "system")
+    
     # Extract metadata (may contain structured data like tracking events)
     result_metadata = result.get("metadata", {})
-
+    
     metadata = TrackingSseMetadata(
-        agent=agent_name,  # type: ignore[arg-type]
+        agent=normalized_agent_name,  # type: ignore[arg-type]
         timestamp=datetime.utcnow(),
         conversationId=body.conversation_id,  # type: ignore[call-arg]
     )

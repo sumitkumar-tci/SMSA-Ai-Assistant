@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from ..models.tracking import TrackingCheckpoint, TrackingResult, TrackingStatus
 from ..config.settings import settings
+from ..logging_config import logger
 
 
 class SMSAAIAssistantSMSATrackingClientConfig(BaseModel):
@@ -470,8 +471,12 @@ class SMSAAIAssistantSMSARetailCentersClient:
     Async client for SMSA Retail Centers / Service Centers API.
 
     Endpoint: https://mobileapi.smsaexpress.com/smsamobilepro/retailcenter.asmx
-    This appears to be a SOAP service (based on .asmx extension).
-    Passkey: rcai$ervice
+    SOAP service with 5 operations:
+    1. ListOfCountries - Get all countries
+    2. ListOfCities - Get cities by country code
+    3. ListOfRetailCities - Get retail cities by country code
+    4. ListOfCenters - Get centers by country and city (returns Lat-Long)
+    5. ServiceCenterByCode - Get center by code
     """
 
     def __init__(self) -> None:
@@ -497,78 +502,274 @@ class SMSAAIAssistantSMSARetailCentersClient:
         headers = {
             "Content-Type": "text/xml; charset=utf-8",
             "SOAPAction": action,
+            "Passkey": self._passkey,
         }
         async with session.post(
             self._base_url,
             data=envelope.encode("utf-8"),
             headers=headers,
         ) as resp:
+            # Get response text first to see error details
+            response_text = await resp.text()
+            
+            # If status is not OK, log the response for debugging
+            if resp.status != 200:
+                logger.error(
+                    "soap_api_error",
+                    status=resp.status,
+                    action=action,
+                    response_preview=response_text[:500],
+                )
+                # Try to parse SOAP fault if present
+                try:
+                    parsed = xmltodict.parse(response_text)
+                    fault = parsed.get("soap:Envelope", {}).get("soap:Body", {}).get("soap:Fault", {})
+                    if fault:
+                        fault_string = fault.get("faultstring") or fault.get("soap:Fault", {}).get("faultstring", "")
+                        error_msg = f"SOAP Fault: {fault_string}"
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message=error_msg,
+                        )
+                except Exception:
+                    pass  # If parsing fails, use original error
+            
             resp.raise_for_status()
-            return await resp.text()
+            return response_text
 
-    async def get_retail_centers(
+    async def list_of_countries(self) -> Dict[str, Any]:
+        """Get list of all countries."""
+        soap_action = "https://mobileapi.smsaexpress.com/smsamobilepro/ListOfCountries"
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <ListOfCountries xmlns="https://mobileapi.smsaexpress.com/smsamobilepro/">
+      <language>English</language>
+      <passkey>{self._passkey}</passkey>
+    </ListOfCountries>
+  </soap:Body>
+</soap:Envelope>"""
+        try:
+            xml_text = await self._post_soap(soap_action, envelope)
+            parsed = xmltodict.parse(xml_text)
+            body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
+            response = body.get("ListOfCountriesResponse", {}).get("ListOfCountriesResult", {})
+            countries = []
+            if isinstance(response, dict):
+                country_list = response.get("countryRes", [])
+                if not isinstance(country_list, list):
+                    country_list = [country_list] if country_list else []
+                
+                for country_item in country_list:
+                    if isinstance(country_item, dict):
+                        countries.append({
+                            "name": str(country_item.get("Country") or ""),
+                            "code": str(country_item.get("Ccode") or ""),
+                            "is_from": (country_item.get("IsFrom") or "False") == "True",
+                        })
+            return {"success": True, "countries": countries}
+        except Exception as e:
+            logger.error("list_of_countries_error", error=str(e), exc_info=True)
+            return {"success": False, "error_message": str(e), "countries": []}
+
+    async def list_of_cities(self, country: str = "SA") -> Dict[str, Any]:
+        """Get list of cities by country code."""
+        soap_action = "https://mobileapi.smsaexpress.com/smsamobilepro/ListOfCities"
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <ListOfCities xmlns="https://mobileapi.smsaexpress.com/smsamobilepro/">
+      <country>{country}</country>
+      <language>English</language>
+      <passkey>{self._passkey}</passkey>
+    </ListOfCities>
+  </soap:Body>
+</soap:Envelope>"""
+        try:
+            xml_text = await self._post_soap(soap_action, envelope)
+            parsed = xmltodict.parse(xml_text)
+            body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
+            response = body.get("ListOfCitiesResponse", {}).get("ListOfCitiesResult", {})
+            cities = []
+            if isinstance(response, dict):
+                city_list = response.get("CitiesRes", [])
+                if not isinstance(city_list, list):
+                    city_list = [city_list] if city_list else []
+                
+                for city_item in city_list:
+                    if isinstance(city_item, dict):
+                        cities.append({
+                            "name": str(city_item.get("City") or ""),
+                            "is_capital": (city_item.get("Iscapital") or "False") == "True",
+                        })
+            return {"success": True, "cities": cities}
+        except Exception as e:
+            logger.error("list_of_cities_error", error=str(e), country=country, exc_info=True)
+            return {"success": False, "error_message": str(e), "cities": []}
+
+    async def list_of_retail_cities(self, country: str = "SA") -> Dict[str, Any]:
+        """Get list of retail cities by country code."""
+        soap_action = "https://mobileapi.smsaexpress.com/smsamobilepro/ListOfRetailCities"
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <ListOfRetailCities xmlns="https://mobileapi.smsaexpress.com/smsamobilepro/">
+      <country>{country}</country>
+      <language>English</language>
+      <passkey>{self._passkey}</passkey>
+    </ListOfRetailCities>
+  </soap:Body>
+</soap:Envelope>"""
+        try:
+            xml_text = await self._post_soap(soap_action, envelope)
+            parsed = xmltodict.parse(xml_text)
+            body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
+            response = body.get("ListOfRetailCitiesResponse", {}).get("ListOfRetailCitiesResult", {})
+            cities = []
+            if isinstance(response, dict):
+                city_list = response.get("Rcity", [])
+                if not isinstance(city_list, list):
+                    city_list = [city_list] if city_list else []
+                
+                for city_item in city_list:
+                    if isinstance(city_item, dict):
+                        city_name = city_item.get("City")
+                        if city_name:
+                            cities.append({"name": str(city_name)})
+            return {"success": True, "cities": cities}
+        except Exception as e:
+            logger.error("list_of_retail_cities_error", error=str(e), country=country, exc_info=True)
+            return {"success": False, "error_message": str(e), "cities": []}
+
+    def _parse_working_hours(self, center_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse working hours from center data.
+        Returns dict with day names as keys and list of shifts as values.
+        """
+        days = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"]
+        working_hours = {}
+        
+        for day in days:
+            shifts = []
+            # Check for shift 1 - handle None values
+            shift1_from_val = center_data.get(f"{day}Shift1From") or ""
+            shift1_to_val = center_data.get(f"{day}Shift1To") or ""
+            shift1_from = str(shift1_from_val).strip() if shift1_from_val is not None else ""
+            shift1_to = str(shift1_to_val).strip() if shift1_to_val is not None else ""
+            if shift1_from and shift1_to:
+                shifts.append(f"{shift1_from}-{shift1_to}")
+            
+            # Check for shift 2 - handle None values
+            shift2_from_val = center_data.get(f"{day}Shift2From") or ""
+            shift2_to_val = center_data.get(f"{day}Shift2To") or ""
+            shift2_from = str(shift2_from_val).strip() if shift2_from_val is not None else ""
+            shift2_to = str(shift2_to_val).strip() if shift2_to_val is not None else ""
+            if shift2_from and shift2_to:
+                shifts.append(f"{shift2_from}-{shift2_to}")
+            
+            if shifts:
+                working_hours[day] = shifts
+            else:
+                working_hours[day] = []  # Closed or no shifts
+        
+        return working_hours
+
+    async def list_of_centers(
         self,
         city: Optional[str] = None,
         country: str = "SA",
     ) -> Dict[str, Any]:
         """
-        Get retail/service centers from SMSA API.
-
-        Args:
-            city: City name (e.g., "Riyadh", "Jeddah") - optional, returns all if not specified
-            country: Country code (default: "SA")
-
-        Returns:
-            Dict with success, centers list, and error info if any.
+        Get list of service centers by country and city.
+        Returns centers with Lat-Long coordinates.
         """
-        # TODO: Get exact SOAP structure from SMSA API documentation
-        # For now, implementing a basic structure that can be updated
-        # Based on typical SOAP patterns and the tracking API structure
-
-        # Build SOAP envelope
-        # Note: This is a placeholder - actual structure needs to be confirmed
-        soap_action = "http://tempuri.org/GetRetailCenters"  # Placeholder action
+        soap_action = "https://mobileapi.smsaexpress.com/smsamobilepro/ListOfCenters"
+        city_xml = f"<city>{city}</city>" if city else ""
         envelope = f"""<?xml version="1.0" encoding="utf-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <tem:GetRetailCenters>
-      <tem:Country>{country}</tem:Country>
-      {f'<tem:City>{city}</tem:City>' if city else ''}
-      <tem:Passkey>{self._passkey}</tem:Passkey>
-    </tem:GetRetailCenters>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <ListOfCenters xmlns="https://mobileapi.smsaexpress.com/smsamobilepro/">
+      <country>{country}</country>
+      {city_xml}
+      <language>English</language>
+      <passkey>{self._passkey}</passkey>
+    </ListOfCenters>
+  </soap:Body>
+</soap:Envelope>"""
         try:
             xml_text = await self._post_soap(soap_action, envelope)
-            
-            # Parse XML response
             parsed = xmltodict.parse(xml_text)
-            
-            # Navigate through SOAP envelope structure
             body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
-            response = body.get("GetRetailCentersResponse", {})
-            result = response.get("GetRetailCentersResult", {})
+            response = body.get("ListOfCentersResponse", {}).get("ListOfCentersResult", {})
             
-            # Extract centers (structure may vary)
             centers = []
-            if isinstance(result, dict):
-                # Try different possible structures
-                center_list = result.get("RetailCenter") or result.get("Centers") or result.get("Data", [])
+            if isinstance(response, dict):
+                center_list = response.get("RetailRes", [])
                 if not isinstance(center_list, list):
                     center_list = [center_list] if center_list else []
                 
-                for center in center_list:
-                    if isinstance(center, dict):
+                for center_data in center_list:
+                    if isinstance(center_data, dict):
+                        # Extract coordinates (critical for distance calculation)
+                        # Handle None values properly
+                        lat_val = center_data.get("GPSCoordinateLatitude") or ""
+                        lng_val = center_data.get("GPSCoordinateLongitude") or ""
+                        lat_str = str(lat_val).strip() if lat_val is not None else ""
+                        lng_str = str(lng_val).strip() if lng_val is not None else ""
+                        
+                        latitude = None
+                        longitude = None
+                        try:
+                            if lat_str:
+                                latitude = float(lat_str)
+                            if lng_str:
+                                longitude = float(lng_str)
+                        except (ValueError, TypeError):
+                            pass
+                        
+                        # Parse working hours
+                        working_hours = self._parse_working_hours(center_data)
+                        
+                        # Extract address (use Address1En) - handle None
+                        address_val = center_data.get("Address1En") or ""
+                        address = str(address_val).strip() if address_val is not None else ""
+                        
+                        # Generate center name from address or use city
+                        # Address format: "KSA 41112 - RUH Sultanah Swaidi St."
+                        # Try to extract area/street name for better naming
+                        city_val = center_data.get("City") or "Service Center"
+                        city_name = str(city_val) if city_val is not None else "Service Center"
+                        center_name = f"SMSA {city_name} Branch"
+                        if address and address != "N/A":
+                            # Try to extract area name from address (after "RUH" or similar patterns)
+                            address_parts = address.split(" - ")
+                            if len(address_parts) > 1:
+                                area_part = address_parts[1].split(" St.")[0].split(" Rd.")[0]
+                                if area_part and len(area_part) > 3:
+                                    center_name = f"SMSA {area_part} Branch"
+                        
+                        # Helper function to safely get and strip string values
+                        def safe_get_str(key: str, default: str = "N/A") -> str:
+                            val = center_data.get(key)
+                            if val is None:
+                                return default
+                            return str(val).strip() or default
+                        
                         centers.append({
-                            "name": center.get("Name") or center.get("OfficeName") or "SMSA Service Center",
-                            "address": center.get("Address") or center.get("FullAddress") or "N/A",
-                            "city": center.get("City") or city or "N/A",
-                            "phone": center.get("Phone") or center.get("ContactNumber") or "N/A",
-                            "hours": center.get("Hours") or center.get("WorkingHours") or "N/A",
-                            "latitude": center.get("Latitude") or center.get("Lat"),
-                            "longitude": center.get("Longitude") or center.get("Lng"),
+                            "code": safe_get_str("Retailcode", "N/A"),
+                            "name": center_name,
+                            "address": address or "N/A",
+                            "city": safe_get_str("City", city or "N/A"),
+                            "country": safe_get_str("Country", "N/A"),
+                            "region": safe_get_str("Region", "N/A"),
+                            "phone": safe_get_str("Phone", "N/A"),
+                            "latitude": latitude,
+                            "longitude": longitude,
+                            "working_hours": working_hours,
+                            "cold_box": (center_data.get("ColdBox") or "N") == "Y",
+                            "short_code": safe_get_str("ShortCode", "N/A"),
                         })
             
             return {
@@ -577,7 +778,27 @@ class SMSAAIAssistantSMSARetailCentersClient:
                 "count": len(centers),
             }
 
+        except aiohttp.ClientResponseError as e:
+            logger.error(
+                "retail_centers_api_error",
+                status=e.status,
+                message=e.message,
+                city=city,
+                country=country,
+            )
+            return {
+                "success": False,
+                "error_code": "API_ERROR",
+                "error_message": f"SMSA retail centers API returned error {e.status}: {e.message}",
+                "centers": [],
+            }
         except aiohttp.ClientError as e:
+            logger.error(
+                "retail_centers_network_error",
+                error=str(e),
+                city=city,
+                country=country,
+            )
             return {
                 "success": False,
                 "error_code": "NETWORK_ERROR",
@@ -585,11 +806,109 @@ class SMSAAIAssistantSMSARetailCentersClient:
                 "centers": [],
             }
         except Exception as e:
-            # If SOAP structure is wrong, return a helpful error
+            logger.error(
+                "retail_centers_unexpected_error",
+                error=str(e),
+                city=city,
+                country=country,
+                exc_info=True,
+            )
             return {
                 "success": False,
                 "error_code": "API_ERROR",
-                "error_message": f"SMSA retail centers API error: {e}. Note: SOAP structure may need to be confirmed with SMSA API documentation.",
+                "error_message": f"SMSA retail centers API error: {e}",
                 "centers": [],
             }
 
+    async def service_center_by_code(self, code: str) -> Dict[str, Any]:
+        """Get service center details by code."""
+        soap_action = "https://mobileapi.smsaexpress.com/smsamobilepro/ServiceCenterByCode"
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <ServiceCenterByCode xmlns="https://mobileapi.smsaexpress.com/smsamobilepro/">
+      <code>{code}</code>
+      <language>English</language>
+      <passkey>{self._passkey}</passkey>
+    </ServiceCenterByCode>
+  </soap:Body>
+</soap:Envelope>"""
+        try:
+            xml_text = await self._post_soap(soap_action, envelope)
+            parsed = xmltodict.parse(xml_text)
+            body = parsed.get("soap:Envelope", {}).get("soap:Body", {})
+            response = body.get("ServiceCenterByCodeResponse", {}).get("ServiceCenterByCodeResult", {})
+            
+            if isinstance(response, dict):
+                center_data = response.get("RetailRes", {})
+                if isinstance(center_data, dict):
+                    # Extract coordinates - handle None values
+                    lat_val = center_data.get("GPSCoordinateLatitude") or ""
+                    lng_val = center_data.get("GPSCoordinateLongitude") or ""
+                    lat_str = str(lat_val).strip() if lat_val is not None else ""
+                    lng_str = str(lng_val).strip() if lng_val is not None else ""
+                    
+                    latitude = None
+                    longitude = None
+                    try:
+                        if lat_str:
+                            latitude = float(lat_str)
+                        if lng_str:
+                            longitude = float(lng_str)
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # Parse working hours
+                    working_hours = self._parse_working_hours(center_data)
+                    
+                    # Extract address - handle None
+                    address_val = center_data.get("Address1En") or ""
+                    address = str(address_val).strip() if address_val is not None else ""
+                    
+                    # Generate center name from address or use city
+                    city_val = center_data.get("City") or "Service Center"
+                    city_name = str(city_val) if city_val is not None else "Service Center"
+                    center_name = f"SMSA {city_name} Branch"
+                    if address and address != "N/A":
+                        # Try to extract area name from address
+                        address_parts = address.split(" - ")
+                        if len(address_parts) > 1:
+                            area_part = address_parts[1].split(" St.")[0].split(" Rd.")[0]
+                            if area_part and len(area_part) > 3:
+                                center_name = f"SMSA {area_part} Branch"
+                    
+                    # Helper function to safely get and strip string values
+                    def safe_get_str(key: str, default: str = "N/A") -> str:
+                        val = center_data.get(key)
+                        if val is None:
+                            return default
+                        return str(val).strip() or default
+                    
+                    center = {
+                        "code": safe_get_str("Retailcode", code),
+                        "name": center_name,
+                        "address": address or "N/A",
+                        "city": safe_get_str("City", "N/A"),
+                        "country": safe_get_str("Country", "N/A"),
+                        "region": safe_get_str("Region", "N/A"),
+                        "phone": safe_get_str("Phone", "N/A"),
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "working_hours": working_hours,
+                        "cold_box": (center_data.get("ColdBox") or "N") == "Y",
+                        "short_code": safe_get_str("ShortCode", "N/A"),
+                    }
+                    return {"success": True, "center": center}
+            return {"success": False, "error_message": "Invalid response format", "center": None}
+        except Exception as e:
+            logger.error("service_center_by_code_error", error=str(e), code=code, exc_info=True)
+            return {"success": False, "error_message": str(e), "center": None}
+
+    # Backward compatibility method
+    async def get_retail_centers(
+        self,
+        city: Optional[str] = None,
+        country: str = "SA",
+    ) -> Dict[str, Any]:
+        """Backward compatibility wrapper for list_of_centers."""
+        return await self.list_of_centers(city=city, country=country)

@@ -240,6 +240,111 @@ function TimelineEvent({
   );
 }
 
+// Retail Centers Message Component
+function RetailCentersMessage({ data, content }: { data: RetailCentersData; content: string }) {
+  const [expandedCenters, setExpandedCenters] = useState(false);
+
+  return (
+    <div className="retail-centers-card">
+      {/* LLM conversational response */}
+      <div 
+        className="retail-conversational-content"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+      />
+
+      {/* Centers List */}
+      {data.centers && data.centers.length > 0 && (
+        <div className="centers-list">
+          <button
+            type="button"
+            className="toggle-centers"
+            onClick={() => setExpandedCenters(!expandedCenters)}
+          >
+            <span>📍</span>
+            <span>Service Centers ({data.centers.length})</span>
+            <span className={`chevron ${expandedCenters ? "expanded" : ""}`}>▼</span>
+          </button>
+
+          {expandedCenters && (
+            <div className="centers-grid">
+              {data.centers.map((center, index) => (
+                <div key={index} className="center-card">
+                  <div className="center-header">
+                    <h4>{center.name}</h4>
+                    {center.distance_km !== undefined && center.distance_km !== null && (
+                      <span className="distance-badge">{center.distance_km} km</span>
+                    )}
+                  </div>
+                  
+                  {center.address && center.address !== "N/A" && (
+                    <div className="center-info">
+                      <span className="info-icon">📍</span>
+                      <span>{center.address}</span>
+                    </div>
+                  )}
+                  
+                  {center.phone && center.phone !== "N/A" && (
+                    <div className="center-info">
+                      <span className="info-icon">📞</span>
+                      <a href={`tel:${center.phone}`}>{center.phone}</a>
+                    </div>
+                  )}
+                  
+                  {/* Working Hours */}
+                  {center.working_hours ? (
+                    <div className="center-info">
+                      <span className="info-icon">🕐</span>
+                      <div className="working-hours">
+                        {Object.entries(center.working_hours).map(([day, shifts]) => {
+                          if (shifts.length === 0) return null;
+                          const dayNames: { [key: string]: string } = {
+                            Sat: "Saturday",
+                            Sun: "Sunday",
+                            Mon: "Monday",
+                            Tue: "Tuesday",
+                            Wed: "Wednesday",
+                            Thu: "Thursday",
+                            Fri: "Friday",
+                          };
+                          return (
+                            <div key={day} className="hours-day">
+                              <strong>{dayNames[day] || day}:</strong> {shifts.join(", ")}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : center.hours && center.hours !== "N/A" ? (
+                    <div className="center-info">
+                      <span className="info-icon">🕐</span>
+                      <span>{center.hours}</span>
+                    </div>
+                  ) : null}
+                  
+                  {center.city && center.city !== "N/A" && (
+                    <div className="center-info">
+                      <span className="info-icon">🏙️</span>
+                      <span>{center.city}</span>
+                    </div>
+                  )}
+                  
+                  {/* Cold Box Indicator */}
+                  {center.cold_box && (
+                    <div className="center-info">
+                      <span className="info-icon">❄️</span>
+                      <span>Cold Storage Available</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Loading State Component
 function TrackingLoadingState({ stage }: { stage: "searching" | "processing" | "formatting" }) {
   const stages = [
@@ -320,6 +425,36 @@ type TrackingData = {
   estimatedDelivery?: string;
 };
 
+type RetailCenter = {
+  code?: string;
+  name: string;
+  address: string;
+  city: string;
+  country?: string;
+  region?: string;
+  phone: string;
+  hours?: string;
+  working_hours?: {
+    [key: string]: string[]; // Day name -> array of shift times (e.g., "Sat": ["8:00-23:00"])
+  };
+  latitude?: number;
+  longitude?: number;
+  distance_km?: number;
+  cold_box?: boolean;
+  short_code?: string;
+};
+
+type RetailCentersData = {
+  centers: RetailCenter[];
+  location_info?: {
+    post_code?: string;
+    area_name?: string;
+    city_name?: string;
+    location_type?: string;
+  };
+  city?: string;
+};
+
 type Message = {
   id: string;
   role: "user" | "bot";
@@ -332,7 +467,8 @@ type Message = {
     destination?: string;
   };
   trackingData?: TrackingData;
-  messageType?: "conversational" | "tracking_result" | "error";
+  retailCentersData?: RetailCentersData;
+  messageType?: "conversational" | "tracking_result" | "retail_result" | "error";
 };
 
 type Conversation = {
@@ -581,6 +717,24 @@ export default function HomePage() {
         if (event.type === "token") {
           // Check if this is a tracking result with structured data
           const hasTrackingData = event.metadata?.raw_data || event.metadata?.events;
+          const hasRetailCenters = event.metadata?.centers && Array.isArray(event.metadata.centers) && event.metadata.centers.length > 0;
+          
+          // Build retail centers data if present
+          const retailCentersData: RetailCentersData | undefined = hasRetailCenters ? {
+            centers: event.metadata.centers as RetailCenter[],
+            location_info: event.metadata.location_info,
+            city: event.metadata.city,
+          } : undefined;
+          
+          // Determine message type
+          let messageType: "conversational" | "tracking_result" | "retail_result" | "error" = "conversational";
+          if (event.metadata?.type) {
+            messageType = event.metadata.type as any;
+          } else if (hasTrackingData) {
+            messageType = "tracking_result";
+          } else if (hasRetailCenters) {
+            messageType = "retail_result";
+          }
           
           // Update or create bot message
           setMessages((prev) => {
@@ -593,7 +747,8 @@ export default function HomePage() {
                       ...msg, 
                       content: event.content,
                       trackingData: event.metadata?.raw_data || msg.trackingData,
-                      messageType: event.metadata?.type || msg.messageType,
+                      retailCentersData: retailCentersData || msg.retailCentersData,
+                      messageType: messageType,
                     }
                   : msg
               );
@@ -604,7 +759,8 @@ export default function HomePage() {
                 role: "bot" as const,
                 content: event.content,
                 trackingData: event.metadata?.raw_data,
-                messageType: event.metadata?.type || (hasTrackingData ? "tracking_result" : "conversational"),
+                retailCentersData: retailCentersData,
+                messageType: messageType,
               }];
             }
           });
@@ -881,6 +1037,8 @@ export default function HomePage() {
                   )}
                   {m.messageType === "tracking_result" && m.trackingData ? (
                     <TrackingMessage data={m.trackingData} content={cleanReasoningContent(m.content)} />
+                  ) : m.messageType === "retail_result" && m.retailCentersData ? (
+                    <RetailCentersMessage data={m.retailCentersData} content={cleanReasoningContent(m.content)} />
                   ) : (
                     <div 
                       className="message-content"
