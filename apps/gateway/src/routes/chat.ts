@@ -35,6 +35,7 @@ router.post(
 
     const body: ChatMessageRequest = {
       conversationId,
+      userId: req.body?.userId, // Pass userId from frontend
       message: req.body?.message ?? "",
       selectedAgent: req.body?.selectedAgent,
       explicitIntent: req.body?.explicitIntent,

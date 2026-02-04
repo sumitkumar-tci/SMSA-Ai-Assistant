@@ -14,7 +14,10 @@ from typing import Any, Dict, List
 from ..logging_config import logger
 
 # Path to FAQ data file
-FAQ_DATA_PATH = Path(__file__).parent.parent.parent.parent / "data_for_faq" / "smsa_chunks.jsonl"
+# This file: apps/ai-engine/src/services/faq_data.py
+# Project root: SMSA-Ai-Assistant/ (where data_for_faq is)
+# Path: services -> src -> ai-engine -> apps -> SMSA-Ai-Assistant
+FAQ_DATA_PATH = Path(__file__).parent.parent.parent.parent.parent / "data_for_faq" / "smsa_chunks.jsonl"
 
 
 class SMSAAIAssistantFAQDataLoader:

@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: smsa-ai-web
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://gateway:3000
+    depends_on:
+      - gateway
+    networks:
+      - smsa-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: smsa-ai-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - AI_ENGINE_URL=http://ai-engine:8000
+      - PORT=3000
+    env_file:
+      - .env
+    depends_on:
+      - ai-engine
+    networks:
+      - smsa-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"] || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ai-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai-engine
+    container_name: smsa-ai-engine
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./data_for_faq:/app/data_for_faq:ro
+    networks:
+      - smsa-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  smsa-network:
+    driver: bridge

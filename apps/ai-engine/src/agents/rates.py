@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Dict
 
 from ..logging_config import logger
@@ -87,9 +88,17 @@ class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
         Format rate API response into user-friendly message.
 
         Handles empty Data array gracefully as per SMSA API behavior.
+        Shows VAT and total amounts clearly.
         """
         if not result.get("success"):
-            error_msg = result.get("error_message", "Unknown error")
+            error_msg = result.get("error_message") or result.get("errorMessage") or "Unknown error"
+            error_code = result.get("error_code") or result.get("errorCode") or "UNKNOWN"
+            logger.warning(
+                "rates_error",
+                error_code=error_code,
+                error_message=error_msg,
+                result=result,
+            )
             return f"I couldn't retrieve rates at the moment: {error_msg}. Please try again later."
 
         rates = result.get("rates", [])
@@ -100,16 +109,22 @@ class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
                 "You can try changing weight, city, or service type."
             )
 
-        # Format rates for display
+        # Format rates for display with VAT and total
         lines = ["Here are the available shipping rates:\n"]
         for rate in rates:
-            service_name = rate.get("serviceName", rate.get("service", "Standard"))
-            amount = rate.get("amount", "N/A")
+            product = rate.get("product", "Standard Service")
+            product_code = rate.get("productCode", "")
+            amount = rate.get("amount", 0)
+            vat_amount = rate.get("vatAmount", 0)
+            total_amount = rate.get("totalAmount", 0)
+            vat_percentage = rate.get("vatPercentage", "15%")
             currency = rate.get("currency", "SAR")
-            eta = rate.get("eta", "N/A")
 
+            # Format: Product Name (Code): Base Amount + VAT = Total Amount
             lines.append(
-                f"• {service_name}: {amount} {currency} (Estimated: {eta} days)"
+                f"• **{product}** ({product_code}):\n"
+                f"  Base: {amount:.2f} {currency} + VAT ({vat_percentage}): {vat_amount:.2f} {currency}\n"
+                f"  **Total: {total_amount:.2f} {currency}**"
             )
 
         return "\n".join(lines)
@@ -128,6 +143,9 @@ class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
             conversation_id=context.get("conversation_id"),
         )
 
+        # Determine language from context or default to English
+        language = "En"  # Can be enhanced to detect from user preference or message
+        
         # Call SMSA Rates API
         result = await self._client.get_rate(
             from_country=rate_params["from_country"],
@@ -135,8 +153,9 @@ class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
             origin_city=rate_params["origin_city"],
             destination_city=rate_params["destination_city"],
             weight=rate_params["weight"],
-            pieces=rate_params["pieces"],
-            service_type=rate_params["service_type"],
+            pieces=rate_params["pieces"],  # Not used in API but kept for compatibility
+            service_type=rate_params["service_type"],  # Not used in API but kept for compatibility
+            language=language,
         )
 
         logger.info(
@@ -145,32 +164,45 @@ class SMSAAIAssistantRatesAgent(SMSAAIAssistantBaseAgent):
             rates_count=len(result.get("rates", [])),
         )
 
-        # Use LLM to generate user-friendly response
-        system_prompt = """You are a helpful AI assistant for SMSA Express shipping rates.
-Generate a SHORT, concise response (2-3 sentences max) about shipping rates.
-If rates are available, list them briefly. If no rates, say "No rates available for this route" and suggest trying different cities or weights.
-Be direct and helpful, avoid long explanations."""
+        # Load production-grade prompt
+        try:
+            prompt_path = Path(__file__).parent.parent / "prompts" / "rates_agent_prompt.txt"
+            if prompt_path.exists():
+                with open(prompt_path, "r", encoding="utf-8") as f:
+                    system_prompt = f.read()
+            else:
+                # Fallback prompt if file not found
+                system_prompt = """You are a professional shipping rates assistant for SMSA Express.
+Provide clear, accurate shipping rate information. Show base amount, VAT, and total for each service option.
+Be friendly, concise, and helpful."""
+        except Exception as e:
+            logger.warning("prompt_load_failed", error=str(e))
+            system_prompt = """You are a professional shipping rates assistant for SMSA Express.
+Provide clear, accurate shipping rate information."""
 
+        # Build user message with context
         import json
-        user_message = f"""User asked: {message}
+        rates_data = result.get("rates", [])
+        
+        user_message = f"""User asked: "{message}"
 
-Rate inquiry parameters:
-- From: {rate_params['origin_city']}, {rate_params['from_country']}
-- To: {rate_params['destination_city']}, {rate_params['to_country']}
+Rate inquiry details:
+- Origin: {rate_params['origin_city']}, {rate_params['from_country']}
+- Destination: {rate_params['destination_city']}, {rate_params['to_country']}
 - Weight: {rate_params['weight']} kg
 - Pieces: {rate_params['pieces']}
 
-Rate data from SMSA API:
-{json.dumps(result, indent=2)}
+Rate options from SMSA API:
+{json.dumps(rates_data, indent=2) if rates_data else "No rates available for this route."}
 
-Generate a helpful response about the shipping rates."""
+Generate a helpful, professional response about these shipping rates. If rates are available, present them clearly with base amount, VAT, and total. If no rates, suggest alternatives."""
 
         try:
             llm_response = await self._llm_client.chat_completion(
                 messages=[{"role": "user", "content": user_message}],
                 system_prompt=system_prompt,
                 temperature=0.7,
-                max_tokens=200,  # Shorter responses
+                max_tokens=400,  # Allow more tokens for detailed rate presentation
             )
             content = llm_response.get("content", "").strip()
             

@@ -805,7 +805,8 @@ Generate a friendly, clear, and informative response about SMSA service center l
 - Include important details: address, phone, hours
 - Be conversational and helpful
 - If distance information is available, mention it naturally
-- Format the response clearly with line breaks between centers"""
+- Format the response clearly with line breaks between centers
+- alway stick to the user intent, if he ask for the other thing then please remind those thing to him what he has already"""
 
         import json
         user_message = f"""User asked: {message}

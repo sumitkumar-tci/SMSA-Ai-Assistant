@@ -16,6 +16,8 @@ __pycache__/
 .python-version
 .venv/
 venv/
+*.egg-info/
+*.egg
 
 # Environment & config
 .env
@@ -33,6 +35,7 @@ Thumbs.db
 *.pem
 *.p12
 config.local.*
+docs/env.production.complete
 
 # Logs
 logs/

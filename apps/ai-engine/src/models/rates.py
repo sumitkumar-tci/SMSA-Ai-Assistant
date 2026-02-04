@@ -6,38 +6,42 @@ from pydantic import BaseModel, Field
 
 
 class RateInquiryRequest(BaseModel):
-    """Request model for SMSA Rates API."""
+    """Request model for SMSA Rates API - matches actual API format."""
 
-    from_country: str = Field(..., alias="FromCountry")
-    to_country: str = Field(..., alias="ToCountry")
-    origin_city: str = Field(..., alias="OriginCity")
-    destination_city: str = Field(..., alias="DestinationCity")
-    weight: str = Field(..., alias="Weight")  # Must be string, not number
-    pieces: str = Field(..., alias="Pieces")  # Must be string, not number
-    service_type: Optional[str] = Field(default=None, alias="ServiceType")
+    fromCountry: str  # lowercase field name
+    fromCity: str
+    toCountry: str
+    toCity: str
+    documents: str = "documents"  # Required field, always "documents"
+    productcategory: str = "Parcel"  # Required field, default "Parcel"
+    weight: str  # Must be string, not number
+    passkey: str  # Passkey in body (not header)
+    language: str = "En"  # "En" or "Ar"
 
     class Config:
         populate_by_name = True
 
 
 class RateOption(BaseModel):
-    """Single rate option from SMSA API response."""
+    """Single rate option from SMSA API response - matches actual API format."""
 
-    service_type: str = Field(..., alias="ServiceType")
-    service_name: str = Field(..., alias="ServiceName")
-    charge: str = Field(..., alias="Charge")
-    currency: str = Field(..., alias="Currency")
-    estimated_days: Optional[str] = Field(default=None, alias="EstimatedDays")
+    Product: str  # Service name (e.g., "SMSA Priority Parcels (SPOP)")
+    Amount: float  # Base amount
+    Currency: str  # Currency code (e.g., "SAR")
+    VatAmount: float  # VAT amount
+    ProductCode: str  # Service code (e.g., "DP", "SSB")
+    TotalAmount: float  # Total including VAT
+    VatPercentage: str  # VAT percentage (e.g., "15%")
 
     class Config:
         populate_by_name = True
 
 
 class RateInquiryResponse(BaseModel):
-    """Response model from SMSA Rates API."""
+    """Response model from SMSA Rates API - matches actual API format."""
 
-    success: bool = Field(..., alias="Success")
-    data: List[RateOption] = Field(default_factory=list, alias="Data")
+    Success: bool
+    Data: List[RateOption] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

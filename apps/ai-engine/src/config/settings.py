@@ -83,17 +83,27 @@ class SMSAAIAssistantSettings(BaseSettings):
     )
 
     # MongoDB (Phase 6)
+    # Connection string format: mongodb://username:password@host1:port1,host2:port2/database?authSource=admin&replicaSet=replica
     mongodb_uri: str = Field(
-        "mongodb://localhost:27017/smsa_ai_assistant", env="MONGODB_URI"
+        "mongodb://localhost:27017/smsa-ai-assistant", env="MONGODB_URI"
     )
 
     # Vector DB - Qdrant (Phase 6)
     qdrant_url: str = Field("http://localhost:6333", env="QDRANT_URL")
     qdrant_api_key: str | None = Field(default=None, env="QDRANT_API_KEY")
 
+    # PostgreSQL with pgvector (for FAQ RAG - Phase 6)
+    postgres_host: str = Field(default="localhost", env="POSTGRES_HOST")
+    postgres_port: int = Field(default=5432, env="POSTGRES_PORT")
+    postgres_db: str = Field(default="smsa_ai_assistant", env="POSTGRES_DB")
+    postgres_user: str = Field(default="", env="POSTGRES_USER")
+    postgres_password: str = Field(default="", env="POSTGRES_PASSWORD")
+    postgres_sslmode: str = Field(default="prefer", env="POSTGRES_SSLMODE")
+
     class Config:
         env_file = str(ENV_FILE_PATH)  # Load from project root
         env_file_encoding = "utf-8"
+        extra = "ignore"  # Ignore extra fields from .env (like NODE_ENV, PORT, etc. for other services)
 
 
 @lru_cache

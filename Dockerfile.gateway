@@ -1,0 +1,56 @@
+# Multi-stage build for Express Gateway (TypeScript)
+FROM node:20-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+WORKDIR /app
+
+# Copy package files
+COPY apps/gateway/package.json apps/gateway/package-lock.json* ./
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm ci
+
+# Build the application
+FROM base AS builder
+WORKDIR /app
+
+# Copy dependencies
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy application code
+COPY apps/gateway ./apps/gateway
+
+# Set working directory to gateway
+WORKDIR /app/apps/gateway
+
+# Build TypeScript
+RUN npm run build
+
+# Production image
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nodejs
+
+# Copy built application and dependencies
+COPY --from=builder /app/apps/gateway/dist ./apps/gateway/dist
+COPY --from=builder /app/apps/gateway/package.json ./apps/gateway/
+COPY --from=deps /app/node_modules ./node_modules
+
+# Set correct permissions
+RUN chown -R nodejs:nodejs /app
+
+USER nodejs
+
+EXPOSE 3000
+
+WORKDIR /app/apps/gateway
+
+# Start the application
+CMD ["node", "dist/index.js"]

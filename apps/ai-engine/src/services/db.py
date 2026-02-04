@@ -45,12 +45,27 @@ class SMSAAIAssistantDatabaseManager:
         if self._client is None:
             self._client = AsyncIOMotorClient(self.connection_string)
             # Extract database name from connection string or use default
-            db_name = "smsa_ai_assistant"
-            if "/" in self.connection_string:
-                # Extract from mongodb://host:port/dbname
-                parts = self.connection_string.split("/")
-                if len(parts) > 3:
-                    db_name = parts[-1].split("?")[0]  # Remove query params
+            # Format: mongodb://[username:password@]host[:port][,host2:port2]/database[?options]
+            db_name = "smsa-ai-assistant"  # Default database name
+            try:
+                # Parse connection string to extract database name
+                # Remove mongodb:// prefix
+                uri = self.connection_string.replace("mongodb://", "")
+                # Split by / to get database part
+                if "/" in uri:
+                    db_part = uri.split("/")[-1]  # Get last part after /
+                    # Remove query parameters (everything after ?)
+                    if "?" in db_part:
+                        db_name = db_part.split("?")[0]
+                    else:
+                        db_name = db_part
+                    # If database name is empty, use default
+                    if not db_name:
+                        db_name = "smsa-ai-assistant"
+            except Exception as e:
+                # If parsing fails, use default
+                from ..logging_config import logger
+                logger.warning("mongodb_db_name_extraction_failed", error=str(e), using_default=db_name)
             self._db = self._client[db_name]
 
     async def disconnect(self) -> None:
@@ -61,7 +76,7 @@ class SMSAAIAssistantDatabaseManager:
             self._db = None
 
     async def create_conversation(
-        self, user_id: str, metadata: Optional[Dict[str, Any]] = None
+        self, user_id: str, metadata: Optional[Dict[str, Any]] = None, conversation_id: Optional[str] = None
     ) -> str:
         """
         Create a new conversation.
@@ -69,15 +84,18 @@ class SMSAAIAssistantDatabaseManager:
         Args:
             user_id: User identifier
             metadata: Optional conversation metadata
+            conversation_id: Optional conversation ID (if not provided, generates UUID)
 
         Returns:
-            Conversation ID (generated UUID)
+            Conversation ID
         """
         import uuid
 
         await self.connect()
 
-        conversation_id = str(uuid.uuid4())
+        if conversation_id is None:
+            conversation_id = str(uuid.uuid4())
+        
         conversation = {
             "conversation_id": conversation_id,
             "user_id": user_id,
@@ -92,6 +110,37 @@ class SMSAAIAssistantDatabaseManager:
             return conversation_id
         except PyMongoError as e:
             raise RuntimeError(f"Failed to create conversation: {e}") from e
+
+    async def ensure_conversation_exists(
+        self, conversation_id: str, user_id: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Ensure a conversation exists, creating it if it doesn't.
+
+        Args:
+            conversation_id: Conversation identifier
+            user_id: User identifier
+            metadata: Optional conversation metadata
+
+        Returns:
+            True if conversation exists or was created, False otherwise
+        """
+        try:
+            existing = await self.get_conversation(conversation_id)
+            if existing:
+                return True
+            
+            # Create conversation with specified ID
+            await self.create_conversation(
+                user_id=user_id,
+                metadata=metadata,
+                conversation_id=conversation_id,
+            )
+            return True
+        except Exception as e:
+            from ..logging_config import logger
+            logger.warning("ensure_conversation_failed", error=str(e), conversation_id=conversation_id)
+            return False
 
     async def save_message(
         self,

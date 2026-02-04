@@ -353,12 +353,21 @@ class SMSAAIAssistantSMSARatesClient:
     Async client for SMSA Rates Inquiry REST API.
 
     Endpoint: POST https://mobileapi.smsaexpress.com/SmsaMobileWebServiceRestApi/api/RateInquiry/inquiry
-    Headers: Content-Type: application/json, Passkey: riai$ervice
+    Headers: Content-Type: application/json, Passkey: <from env SMSA_RATES_PASSKEY>
     """
 
     def __init__(self) -> None:
+        from ..config.settings import get_settings
+        from ..logging_config import logger
+
+        settings = get_settings()
         self._base_url = settings.smsa_rates_base_url
         self._passkey = settings.smsa_rates_passkey
+        
+        # Log if passkey is missing
+        if not self._passkey:
+            logger.warning("rates_passkey_missing", message="SMSA Rates passkey is not configured in .env file")
+        
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -378,8 +387,9 @@ class SMSAAIAssistantSMSARatesClient:
         origin_city: str,
         destination_city: str,
         weight: str,
-        pieces: str,
+        pieces: str = "1",
         service_type: Optional[str] = None,
+        language: str = "En",
     ) -> Dict[str, Any]:
         """
         Get shipping rates from SMSA Rates API.
@@ -389,9 +399,10 @@ class SMSAAIAssistantSMSARatesClient:
             to_country: Destination country code (e.g., "SA")
             origin_city: Origin city name (e.g., "Riyadh")
             destination_city: Destination city name (e.g., "Jeddah")
-            weight: Weight as string (e.g., "5")
-            pieces: Number of pieces as string (e.g., "1")
-            service_type: Optional service type (e.g., "DLV")
+            weight: Weight as string (e.g., "1")
+            pieces: Number of pieces as string (e.g., "1") - not used in API but kept for compatibility
+            service_type: Optional service type - not used in actual API
+            language: Language code "En" or "Ar" (default: "En")
 
         Returns:
             Dict with success, rates data, and error info if any.
@@ -400,69 +411,126 @@ class SMSAAIAssistantSMSARatesClient:
 
         session = await self._get_session()
 
-        # Build request payload - all fields as strings
+        # Validate passkey
+        if not self._passkey:
+            from ..logging_config import logger
+            logger.error("rates_passkey_missing", message="Cannot make API call without passkey")
+            return RateResult(
+                success=False,
+                error_code="CONFIG_ERROR",
+                error_message="Rates API passkey is not configured. Please check .env file.",
+            ).model_dump(by_alias=True)
+
+        # Build request payload - MUST match actual API format (lowercase field names)
         payload = {
-            "FromCountry": from_country,
-            "ToCountry": to_country,
-            "OriginCity": origin_city,
-            "DestinationCity": destination_city,
-            "Weight": weight,  # Must be string, not number
-            "Pieces": pieces,  # Must be string, not number
+            "fromCountry": from_country,
+            "fromCity": origin_city,
+            "toCountry": to_country,
+            "toCity": destination_city,
+            "documents": "documents",  # Required field
+            "productcategory": "Parcel",  # Required field
+            "weight": weight,  # Must be string
+            "passkey": self._passkey,  # Passkey in body, not header
+            "language": language,  # "En" or "Ar"
         }
-        if service_type:
-            payload["ServiceType"] = service_type
 
         headers = {
             "Content-Type": "application/json",
-            "Passkey": self._passkey,
         }
 
         try:
+            from ..logging_config import logger
+            logger.info("rates_api_request", payload=payload, url=self._base_url)
+            
             async with session.post(
                 self._base_url, json=payload, headers=headers
             ) as resp:
+                response_text = await resp.text()
+                logger.info("rates_api_response", status=resp.status, response_preview=response_text[:500])
+                
                 if resp.status != 200:
-                    text = await resp.text()
                     return RateResult(
                         success=False,
                         error_code="HTTP_ERROR",
-                        error_message=f"SMSA rates API error {resp.status}: {text[:200]}",
+                        error_message=f"SMSA rates API error {resp.status}: {response_text[:200]}",
                     ).model_dump(by_alias=True)
 
-                json_data = await resp.json()
+                # Parse JSON response
+                try:
+                    json_data = await resp.json()
+                except Exception as json_error:
+                    logger.error("rates_api_json_parse_error", error=str(json_error), response_text=response_text[:500])
+                    return RateResult(
+                        success=False,
+                        error_code="JSON_PARSE_ERROR",
+                        error_message=f"Invalid JSON response from API: {str(json_error)}",
+                    ).model_dump(by_alias=True)
+
+                logger.info("rates_api_json_data", json_data=json_data)
 
                 # Parse response using Pydantic model
-                api_response = RateInquiryResponse(**json_data)
+                # API returns: {"Success": bool, "Data": [...]}
+                try:
+                    api_response = RateInquiryResponse(**json_data)
+                except Exception as pydantic_error:
+                    logger.error(
+                        "rates_api_pydantic_error",
+                        error=str(pydantic_error),
+                        json_data=json_data,
+                    )
+                    return RateResult(
+                        success=False,
+                        error_code="MODEL_PARSE_ERROR",
+                        error_message=f"Failed to parse API response: {str(pydantic_error)}",
+                    ).model_dump(by_alias=True)
+
+                # Access fields directly - Pydantic models use the field name as attribute
+                # API returns: {"Success": bool, "Data": [...]}
+                success = api_response.Success
+                data_list = api_response.Data
 
                 # Convert to agent-friendly format
                 rates = []
-                for rate_option in api_response.data:
+                for rate_option in data_list:
                     rates.append(
                         {
-                            "service": rate_option.service_type,
-                            "serviceName": rate_option.service_name,
-                            "amount": rate_option.charge,
-                            "currency": rate_option.currency,
-                            "eta": rate_option.estimated_days or "N/A",
+                            "product": rate_option.Product,
+                            "productCode": rate_option.ProductCode,
+                            "amount": rate_option.Amount,
+                            "vatAmount": rate_option.VatAmount,
+                            "totalAmount": rate_option.TotalAmount,
+                            "vatPercentage": rate_option.VatPercentage,
+                            "currency": rate_option.Currency,
                         }
                     )
 
+                logger.info("rates_api_success", rates_count=len(rates), success=success)
                 return RateResult(
-                    success=api_response.success,
+                    success=success,
                     rates=rates,
                 ).model_dump(by_alias=True)
 
         except aiohttp.ClientError as e:
+            from ..logging_config import logger
+            logger.error("rates_api_network_error", error=str(e), url=self._base_url)
             return RateResult(
                 success=False,
                 error_code="NETWORK_ERROR",
                 error_message=f"Failed to connect to SMSA rates API: {e}",
             ).model_dump(by_alias=True)
         except Exception as e:
+            from ..logging_config import logger
+            import traceback
+            logger.error(
+                "rates_api_parse_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                traceback=traceback.format_exc(),
+            )
             return RateResult(
                 success=False,
                 error_code="PARSE_ERROR",
-                error_message=f"Failed to parse SMSA rates response: {e}",
+                error_message=f"Failed to parse SMSA rates response: {str(e)}",
             ).model_dump(by_alias=True)
 
 

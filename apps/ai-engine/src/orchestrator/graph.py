@@ -19,6 +19,7 @@ from ..agents.retail import SMSAAIAssistantRetailCentersAgent
 from ..agents.tracking import SMSAAIAssistantTrackingAgent
 from ..services.storage import SMSAAIAssistantStorageClient
 from ..services.vision_client import SMSAAIAssistantVisionClient
+from ..services.db import SMSAAIAssistantDatabaseManager
 from ..logging_config import logger
 
 
@@ -42,6 +43,7 @@ class SMSAAIAssistantOrchestratorGraph:
         self._faq_agent = SMSAAIAssistantFAQAgent()
         self._storage_client = SMSAAIAssistantStorageClient()
         self._vision_client = SMSAAIAssistantVisionClient()
+        self._db_manager = SMSAAIAssistantDatabaseManager()
 
         # Build the graph
         self._graph = self._build_graph()
@@ -145,10 +147,26 @@ class SMSAAIAssistantOrchestratorGraph:
             except Exception as e:
                 logger.warning("file_context_load_failed", error=str(e), file_id=state.file_id)
 
-        # TODO: Load conversation history from MongoDB
-        # conversation_history = await db_client.get_conversation_history(
-        #     state.conversation_id, limit=10
-        # )
+        # Load conversation history from MongoDB
+        conversation_history = []
+        try:
+            if state.conversation_id and state.conversation_id != "default":
+                conversation_history = await self._db_manager.get_conversation_history(
+                    state.conversation_id, limit=10
+                )
+                logger.info(
+                    "conversation_history_loaded",
+                    conversation_id=state.conversation_id,
+                    message_count=len(conversation_history),
+                )
+        except Exception as e:
+            # If MongoDB connection fails, log warning but continue without history
+            logger.warning(
+                "conversation_history_load_failed",
+                error=str(e),
+                conversation_id=state.conversation_id,
+            )
+            conversation_history = []
 
         # TODO: Semantic search for FAQ/RAG
         # if state.intent == Intent.FAQ:
@@ -157,7 +175,7 @@ class SMSAAIAssistantOrchestratorGraph:
         #     )
 
         return {
-            "conversation_history": [],  # Placeholder
+            "conversation_history": conversation_history,
             "file_context": file_context,
             "semantic_context": {},  # Placeholder
         }
@@ -227,6 +245,7 @@ class SMSAAIAssistantOrchestratorGraph:
 
         Extracts content and metadata from agent response.
         Preserves structured data (like tracking events) for frontend rendering.
+        Saves conversation to MongoDB.
         """
         content = ""
         metadata: Dict[str, Any] = {}
@@ -261,6 +280,63 @@ class SMSAAIAssistantOrchestratorGraph:
                 metadata["city"] = state.agent_response["city"]
             if "needs_clarification" in state.agent_response:
                 metadata["needs_clarification"] = state.agent_response["needs_clarification"]
+
+        # Save conversation to MongoDB
+        try:
+            if state.conversation_id and state.conversation_id != "default":
+                user_id = state.user_id or "anonymous"
+                
+                # Ensure conversation exists (create if it doesn't)
+                try:
+                    await self._db_manager.ensure_conversation_exists(
+                        conversation_id=state.conversation_id,
+                        user_id=user_id,
+                        metadata={
+                            "intent": state.intent.value if state.intent else None,
+                            "selected_agent": state.selected_agent,
+                        },
+                    )
+                except Exception as conv_error:
+                    logger.warning("conversation_ensure_failed", error=str(conv_error))
+                    # Continue - messages can still be saved even if conversation record doesn't exist
+
+                # Save user message
+                try:
+                    await self._db_manager.save_message(
+                        conversation_id=state.conversation_id,
+                        role="user",
+                        content=state.message,
+                        metadata={
+                            "intent": state.intent.value if state.intent else None,
+                            "intent_confidence": state.intent_confidence,
+                            "selected_agent": state.selected_agent,
+                        },
+                    )
+                    logger.debug("user_message_saved", conversation_id=state.conversation_id)
+                except Exception as msg_error:
+                    logger.warning("user_message_save_failed", error=str(msg_error))
+
+                # Save assistant response
+                try:
+                    await self._db_manager.save_message(
+                        conversation_id=state.conversation_id,
+                        role="assistant",
+                        content=content,
+                        metadata={
+                            "agent": metadata.get("agent", state.agent_name),
+                            "intent": state.intent.value if state.intent else None,
+                        },
+                    )
+                    logger.debug("assistant_message_saved", conversation_id=state.conversation_id)
+                except Exception as resp_error:
+                    logger.warning("assistant_message_save_failed", error=str(resp_error))
+        except Exception as db_error:
+            # If MongoDB is unavailable, log warning but continue
+            logger.warning(
+                "mongodb_save_failed",
+                error=str(db_error),
+                conversation_id=state.conversation_id,
+            )
 
         return {
             "content": content,

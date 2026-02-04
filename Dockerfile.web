@@ -1,0 +1,63 @@
+# Multi-stage build for Next.js web application
+FROM node:20-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+WORKDIR /app
+
+# Copy package files
+COPY apps/web/package.json apps/web/package-lock.json* ./
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm ci
+
+# Rebuild the source code only when needed
+FROM base AS builder
+WORKDIR /app
+
+# Copy dependencies from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy application code
+COPY apps/web ./apps/web
+COPY packages ./packages
+
+# Set working directory to web app
+WORKDIR /app/apps/web
+
+# Build Next.js application
+RUN npm run build
+
+# Production image, copy all the files and run next
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy built application
+# Next.js standalone output structure
+COPY --from=builder /app/apps/web/public ./apps/web/public
+COPY --from=builder /app/apps/web/.next/standalone ./
+COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
+
+# Ensure server.js exists in the right location
+# If standalone doesn't create server.js at root, adjust path
+
+# Set correct permissions
+RUN chown -R nextjs:nodejs /app
+
+USER nextjs
+
+EXPOSE 3001
+
+ENV PORT=3001
+ENV HOSTNAME="0.0.0.0"
+
+# Start the application
+CMD ["node", "apps/web/server.js"]
