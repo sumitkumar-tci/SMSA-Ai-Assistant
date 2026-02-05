@@ -683,7 +683,13 @@ export default function HomePage() {
       const reader = response.body?.getReader();
       if (!reader) {
         setIsSending(false);
-        setMessages((prev) => [...prev, `Bot: Error: No response stream available. Is the gateway running?`]);
+        const errorMessage: Message = {
+          id: Date.now().toString(),
+          role: "bot",
+          content: `❌ Error: No response stream available. Is the gateway running?`,
+          messageType: "error",
+        };
+        setMessages((prev) => [...prev, errorMessage]);
         return;
       }
 
