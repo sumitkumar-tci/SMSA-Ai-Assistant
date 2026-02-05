@@ -5,18 +5,22 @@ FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
 
-# Copy package files
-COPY apps/web/package.json apps/web/package-lock.json* ./
+# Copy package files to web directory
+COPY apps/web/package.json apps/web/package-lock.json* ./apps/web/
 COPY package.json package-lock.json* ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies in web directory
+WORKDIR /app/apps/web
+RUN npm install
+WORKDIR /app
 
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
 
-# Copy dependencies from deps stage
+# Copy dependencies from deps stage (web app dependencies)
+COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
+# Copy root node_modules if exists
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy application code
