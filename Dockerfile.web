@@ -63,6 +63,7 @@ ENV PORT=3001
 ENV HOSTNAME="0.0.0.0"
 
 # Start the application
-# In standalone mode, server.js is at the root of standalone output
+# In standalone mode, server.js preserves the build directory structure
+# Since we built from /app/apps/web, server.js is at apps/web/server.js
 WORKDIR /app
-CMD ["node", "server.js"]
+CMD ["node", "apps/web/server.js"]
