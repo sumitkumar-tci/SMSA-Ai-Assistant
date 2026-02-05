@@ -402,6 +402,14 @@ type TrackingSseEvent = {
     events?: TrackingEvent[];
     current_status?: string;
     status_explanation?: string;
+    centers?: RetailCenter[];
+    location_info?: {
+      post_code?: string;
+      area_name?: string;
+      city_name?: string;
+      location_type?: string;
+    };
+    city?: string;
   };
 };
 
