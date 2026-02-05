@@ -46,8 +46,13 @@ RUN adduser --system --uid 1001 nextjs
 
 # Copy built application
 # Next.js standalone output structure (includes public assets and server.js)
+# Standalone output is at /app/apps/web/.next/standalone/
+# It contains: server.js, package.json, node_modules, and the app structure
 COPY --from=builder /app/apps/web/.next/standalone ./
 COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
+
+# Debug: List files to verify structure (remove in production)
+# RUN ls -la /app && find /app -name "server.js" -type f
 
 # Ensure server.js exists in the right location
 # If standalone doesn't create server.js at root, adjust path
@@ -63,7 +68,7 @@ ENV PORT=3001
 ENV HOSTNAME="0.0.0.0"
 
 # Start the application
-# In standalone mode, server.js preserves the build directory structure
-# Since we built from /app/apps/web, server.js is at apps/web/server.js
+# In Next.js standalone mode, server.js is at the root of standalone output
+# After copying standalone to /app, server.js should be at /app/server.js
 WORKDIR /app
-CMD ["node", "apps/web/server.js"]
+CMD ["node", "server.js"]
