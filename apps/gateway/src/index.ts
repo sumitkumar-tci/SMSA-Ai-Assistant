@@ -16,6 +16,11 @@ app.use(
   })
 );
 
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", service: "gateway" });
+});
+
 app.use("/api", chatRouter);
 app.use("/api", uploadRouter);
 
