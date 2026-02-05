@@ -10,7 +10,7 @@ COPY apps/gateway/package.json apps/gateway/package-lock.json* ./apps/gateway/
 
 # Install dependencies in gateway directory
 WORKDIR /app/apps/gateway
-RUN npm ci
+RUN npm install
 WORKDIR /app
 
 # Build the application
