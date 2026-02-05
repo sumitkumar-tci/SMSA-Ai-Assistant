@@ -5,19 +5,20 @@ FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
 
-# Copy package files
-COPY apps/gateway/package.json apps/gateway/package-lock.json* ./
-COPY package.json package-lock.json* ./
+# Copy package files to gateway directory
+COPY apps/gateway/package.json apps/gateway/package-lock.json* ./apps/gateway/
 
-# Install dependencies
+# Install dependencies in gateway directory
+WORKDIR /app/apps/gateway
 RUN npm ci
+WORKDIR /app
 
 # Build the application
 FROM base AS builder
 WORKDIR /app
 
-# Copy dependencies
-COPY --from=deps /app/node_modules ./node_modules
+# Copy dependencies from gateway directory
+COPY --from=deps /app/apps/gateway/node_modules ./apps/gateway/node_modules
 
 # Copy application code
 COPY apps/gateway ./apps/gateway
@@ -41,7 +42,7 @@ RUN adduser --system --uid 1001 nodejs
 # Copy built application and dependencies
 COPY --from=builder /app/apps/gateway/dist ./apps/gateway/dist
 COPY --from=builder /app/apps/gateway/package.json ./apps/gateway/
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/gateway/node_modules ./apps/gateway/node_modules
 
 # Set correct permissions
 RUN chown -R nodejs:nodejs /app
