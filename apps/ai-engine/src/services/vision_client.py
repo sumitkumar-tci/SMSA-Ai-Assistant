@@ -149,7 +149,7 @@ class SMSAAIAssistantVisionClient:
         }
 
         async with session.post(
-            self.api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)
+            self.api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)  # OPTIMIZED: 30s instead of 120s
         ) as response:
             response.raise_for_status()
             data = await response.json()
@@ -176,54 +176,54 @@ class SMSAAIAssistantVisionClient:
         Returns:
             Dict with 'awb', 'origin', 'destination', 'weight', etc.
         """
-        prompt = """Extract the following information from this shipping waybill (SAWB) document:
-1. AWB number (Air Waybill number)
-2. Origin city/country
-3. Destination city/country
-4. Weight (if visible)
-5. Number of pieces (if visible)
-6. Shipper name (if visible)
-7. Consignee name (if visible)
+        # OPTIMIZED: Much shorter, focused prompt for faster processing
+        prompt = """Find the AWB number in this shipping document. Look for a number that is 10-15 digits long.
 
-Respond with JSON only:
-{
-  "awb": "AWB number or null",
-  "origin": "Origin city or null",
-  "destination": "Destination city or null",
-  "weight": "Weight in kg or null",
-  "pieces": "Number of pieces or null",
-  "shipper": "Shipper name or null",
-  "consignee": "Consignee name or null"
-}"""
+Return JSON only:
+{"awb": "AWB_NUMBER_HERE"}
+
+If no AWB found, return:
+{"awb": null}"""
 
         result = await self.analyze_image(
             image_path=image_path,
             prompt=prompt,
-            max_tokens=500,
-            temperature=0.1,  # Low temperature for structured extraction
+            max_tokens=50,  # OPTIMIZED: Much smaller (was 500)
+            temperature=0.0,  # OPTIMIZED: Deterministic for speed (was 0.1)
         )
 
-        # Parse JSON from response
+        # Parse JSON from response (OPTIMIZED: Simpler parsing)
         content = result.get("content", "").strip()
-        # Remove markdown code blocks if present
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
+        
+        # Clean up response
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+        
         content = content.strip()
 
         try:
             extracted_data = json.loads(content)
+            # OPTIMIZED: Return only AWB for faster processing
             return {
-                **extracted_data,
+                "awb": extracted_data.get("awb"),
+                "origin": None,  # Not extracted for speed
+                "destination": None,  # Not extracted for speed
+                "weight": None,  # Not extracted for speed
+                "pieces": None,  # Not extracted for speed
+                "shipper": None,  # Not extracted for speed
+                "consignee": None,  # Not extracted for speed
                 "raw_response": result.get("content", ""),
             }
         except json.JSONDecodeError:
-            # Fallback: return raw content
+            # OPTIMIZED: Try to extract AWB with regex as fallback
+            import re
+            awb_match = re.search(r'\b\d{10,15}\b', content)
+            awb = awb_match.group() if awb_match else None
+            
             return {
-                "awb": None,
+                "awb": awb,
                 "origin": None,
                 "destination": None,
                 "weight": None,
@@ -231,7 +231,7 @@ Respond with JSON only:
                 "shipper": None,
                 "consignee": None,
                 "raw_response": content,
-                "error": "Failed to parse JSON from vision model",
+                "error": "Used regex fallback for AWB extraction",
             }
 
     async def ocr_text_from_image(

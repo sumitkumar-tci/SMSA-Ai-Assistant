@@ -440,7 +440,9 @@ class SMSAAIAssistantSMSARatesClient:
 
         try:
             from ..logging_config import logger
-            logger.info("rates_api_request", payload=payload, url=self._base_url)
+            # Avoid logging sensitive secrets like the raw passkey
+            safe_payload = {**payload, "passkey": "***"}
+            logger.info("rates_api_request", payload=safe_payload, url=self._base_url)
             
             async with session.post(
                 self._base_url, json=payload, headers=headers

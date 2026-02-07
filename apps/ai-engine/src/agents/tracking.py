@@ -27,6 +27,70 @@ class SMSAAIAssistantTrackingAgent(SMSAAIAssistantBaseAgent):
         super().__init__()  # Load system prompt from file
         self._client = SMSAAIAssistantSMSATrackingClient()
         self._llm_client = SMSAAIAssistantLLMClient()
+        self._inside_thinking = False  # Track if we're inside thinking tags
+
+    def _filter_thinking_content(self, content: str) -> str:
+        """
+        Filter out thinking tags and content within them using stateful tracking.
+        """
+        if not content:
+            return content
+            
+        # Check for thinking tag start
+        if "<think>" in content.lower():
+            self._inside_thinking = True
+            # Remove the opening tag and everything after it in this chunk
+            content = content[:content.lower().find("<think>")]
+            
+        # If we're inside thinking tags, filter out all content
+        if self._inside_thinking:
+            # Check for thinking tag end
+            if "</think>" in content.lower():
+                self._inside_thinking = False
+                # Keep only content after the closing tag
+                end_pos = content.lower().find("</think>") + len("</think>")
+                content = content[end_pos:]
+            else:
+                # We're still inside thinking, filter out all content
+                return ""
+        
+        return content
+
+    def _clean_reasoning_text(self, text: str) -> str:
+        """
+        Clean any remaining reasoning or meta-commentary from the response.
+        """
+        if not text:
+            return text
+            
+        # Remove common reasoning patterns that might slip through
+        reasoning_phrases = [
+            "Check if the VAT is calculated correctly.",
+            "For SPOP:", "For SSB:",
+            "That's correct.",
+            "Finally,", "Also,",
+            "I should also mention",
+            "Make sure the response is concise",
+            "Avoid any markdown",
+            "Alright, that should cover"
+        ]
+        
+        for phrase in reasoning_phrases:
+            text = text.replace(phrase, "")
+        
+        # Clean up any remaining calculation explanations
+        import re
+        # Remove calculation patterns like "122.00 * 0.15 = 18.30"
+        text = re.sub(r'\d+\.\d+\s*\*\s*0\.\d+\s*=\s*\d+\.\d+,?\s*', '', text)
+        
+        # Remove "which matches/rounds to" explanations
+        text = re.sub(r',?\s*which\s+(matches|rounds\s+to)\s+[^.]*\.', '', text)
+        
+        # Clean up extra whitespace and newlines
+        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Multiple newlines to double
+        text = text.strip()
+        
+        return text
 
     def _extract_awbs(self, text: str) -> List[str]:
         """Extract unique AWB-like numbers from the input text."""
@@ -142,6 +206,226 @@ class SMSAAIAssistantTrackingAgent(SMSAAIAssistantBaseAgent):
             "estimatedDelivery": raw.get("estimated_delivery"),
         }
 
+    async def run_stream(self, context: Dict[str, Any]):
+        """
+        Execute tracking agent with streaming support.
+        
+        Streams LLM response character-by-character for better UX.
+        """
+        # Reset thinking state for new request
+        self._inside_thinking = False
+        
+        message: str = context["message"]
+        
+        # Extract AWBs from message
+        awbs = self._extract_awbs(message)
+        
+        # Also check file context for extracted AWB (from Vision API)
+        file_context = context.get("file_context", {})
+        if file_context:
+            extracted_data = file_context.get("extracted_data", {})
+            if extracted_data and extracted_data.get("awb"):
+                awb_from_file = extracted_data["awb"]
+                if awb_from_file not in awbs:
+                    awbs.append(awb_from_file)
+                    logger.info("awb_extracted_from_file", awb=awb_from_file)
+        
+        # Also check parameters for AWB
+        parameters = context.get("parameters", {})
+        if parameters.get("awb") and parameters["awb"] not in awbs:
+            awbs.append(parameters["awb"])
+
+        # If no AWB found, stream conversational response
+        if not awbs:
+            logger.info("tracking_no_awb_found", message=message)
+            
+            # Use the proper prompt file (tracking_agent_prompt.txt)
+            system_prompt = self.system_prompt
+            if not system_prompt:
+                logger.warning("tracking_prompt_not_loaded", message="Tracking agent prompt file not found, using fallback")
+                system_prompt = "You are a friendly SMSA Express tracking assistant. Respond directly without showing reasoning."
+            else:
+                logger.info("tracking_prompt_loaded", prompt_length=len(system_prompt))
+            
+            try:
+                # Stream LLM response
+                logger.info("attempting_llm_stream", message=message[:50])
+                chunk_count = 0
+                async for chunk in self._llm_client.chat_completion_stream(
+                    messages=[{"role": "user", "content": message}],
+                    system_prompt=system_prompt,
+                    temperature=0.3,  # Lower temperature for more consistent responses
+                    max_tokens=200,
+                ):
+                    chunk_count += 1
+                    content = chunk.get("content", "")
+                    
+                    # Apply stateful thinking filter first
+                    content = self._filter_thinking_content(content)
+                    
+                    # Additional reasoning filter for streaming
+                    if content:
+                        content_lower = content.lower().strip()
+                        reasoning_patterns = [
+                            "hi, the user", "the user sent", "according to", "the guidelines", 
+                            "i should respond", "i should", "let me", "okay,", "alright,", 
+                            "first,", "maybe", "the rules", "let me check", "let me make sure", 
+                            "i'll structure", "the response should", "no need to mention",
+                            "just a straightforward", "the main thing is", "should i point",
+                            "probably not", "just respond as if", "keep it friendly",
+                            "yes, the example", "make sure to use", "just follow the script",
+                            "provided in the rules"
+                        ]
+                        
+                        # Skip if content contains reasoning patterns
+                        if any(pattern in content_lower for pattern in reasoning_patterns):
+                            continue
+                        
+                        # Skip if content is just reasoning words or phrases
+                        reasoning_words = ["okay", "alright", "yes", "no", "hmm", "well", "so"]
+                        if content_lower.strip() in reasoning_words and chunk_count < 20:
+                            continue
+                        
+                        # Skip very long sentences that look like reasoning (over 100 chars and contains reasoning keywords)
+                        if len(content) > 100 and any(word in content_lower for word in ["guidelines", "rules", "should", "need to", "according"]):
+                            continue
+                    
+                    logger.debug("llm_stream_chunk", chunk_num=chunk_count, content_len=len(content))
+                    
+                    # Only yield if content is not empty and not reasoning
+                    if content:
+                        yield {
+                            "type": "token",
+                            "content": content,
+                            "metadata": {
+                                "agent": self.name,
+                                "type": "conversational",
+                                "requires_awb": True,
+                            },
+                        }
+                logger.info("llm_stream_complete", total_chunks=chunk_count)
+            except Exception as e:
+                logger.error("llm_stream_failed", error=str(e), exc_info=True)
+                content = "Hello! I'm here to help you track your SMSA shipments. Could you please provide your AWB (tracking) number?"
+                yield {
+                    "type": "token",
+                    "content": content,
+                    "metadata": {
+                        "agent": self.name,
+                        "type": "conversational",
+                        "requires_awb": True,
+                    },
+                }
+            return
+
+        logger.info(
+            "tracking_request",
+            awbs=awbs,
+            conversation_id=context.get("conversation_id"),
+        )
+
+        # Call SMSA tracking API (this is fast, ~1-2 seconds)
+        try:
+            results: List[TrackingResult] = await self._client.track_bulk(awbs)
+            logger.info(
+                "tracking_response",
+                awbs=[r.awb for r in results],
+                count=len(results),
+            )
+        except Exception as e:
+            logger.error("tracking_api_error", error=str(e), awbs=awbs)
+            error_message = f"I encountered an issue while tracking AWB {awbs[0] if awbs else 'your shipment'}. Please try again in a moment, or contact SMSA Express customer support for assistance."
+            yield {
+                "type": "token",
+                "content": error_message,
+                "metadata": {
+                    "agent": self.name,
+                    "type": "error",
+                },
+            }
+            return
+
+        # Process tracking data into structured format
+        processed_data_list = []
+        for r in results:
+            processed_data = self._process_tracking_events(r)
+            processed_data_list.append(processed_data)
+
+        # Format data for LLM context
+        tracking_data = []
+        for processed in processed_data_list:
+            tracking_data.append({
+                "awb": processed["awb"],
+                "status": processed["currentStatus"],
+                "location": processed["location"],
+                "last_update": processed["lastUpdate"],
+                "origin": processed["origin"],
+                "destination": processed["destination"],
+                "events": processed["events"],
+                "status_explanation": self._get_status_explanation(processed["currentStatus"]),
+            })
+
+        # Stream LLM response with tracking data
+        system_prompt = self.system_prompt or """You are a friendly SMSA Express tracking assistant. Respond directly without showing reasoning."""
+        
+        user_message = f"""User asked: {message}
+
+Tracking data:
+{json.dumps(tracking_data, indent=2)}
+
+Generate a helpful, conversational response about the shipment status. Start with current status, explain what it means, then show the shipment journey with all events."""
+
+        try:
+            # Stream LLM response
+            async for chunk in self._llm_client.chat_completion_stream(
+                messages=[{"role": "user", "content": user_message}],
+                system_prompt=system_prompt,
+                temperature=0.3,  # Lower temperature for more consistent responses
+                max_tokens=400,
+            ):
+                content = chunk.get("content", "")
+                
+                # Apply stateful thinking filter
+                content = self._filter_thinking_content(content)
+                
+                # Additional reasoning cleanup for streaming
+                if content:
+                    content_lower = content.lower().strip()
+                    reasoning_starters = ['okay', 'i need to', 'let me', 'first', 'i should', 'maybe']
+                    if any(content_lower.startswith(starter) for starter in reasoning_starters):
+                        continue
+                
+                if content:
+                    yield {
+                        "type": "token",
+                        "content": content,
+                        "metadata": {
+                            "agent": self.name,
+                            "type": "tracking_result",
+                            "raw_data": processed_data_list[0] if processed_data_list else {},
+                            "events": processed_data_list[0].get("events", []) if processed_data_list else [],
+                            "current_status": processed_data_list[0].get("currentStatus", "") if processed_data_list else "",
+                            "status_explanation": self._get_status_explanation(processed_data_list[0].get("currentStatus", "")) if processed_data_list else "",
+                        },
+                    }
+        except Exception as e:
+            logger.warning("llm_stream_failed", error=str(e))
+            # Fallback to formatted lines
+            lines: List[str] = [self._format_result_line(r) for r in results]
+            content = "\n".join(lines)
+            yield {
+                "type": "token",
+                "content": content,
+                "metadata": {
+                    "agent": self.name,
+                    "type": "tracking_result",
+                    "raw_data": processed_data_list[0] if processed_data_list else {},
+                    "events": processed_data_list[0].get("events", []) if processed_data_list else [],
+                    "current_status": processed_data_list[0].get("currentStatus", "") if processed_data_list else "",
+                    "status_explanation": self._get_status_explanation(processed_data_list[0].get("currentStatus", "")) if processed_data_list else "",
+                },
+            }
+
     async def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         message: str = context["message"]
         
@@ -178,10 +462,13 @@ class SMSAAIAssistantTrackingAgent(SMSAAIAssistantBaseAgent):
                 llm_response = await self._llm_client.chat_completion(
                     messages=[{"role": "user", "content": message}],
                     system_prompt=system_prompt,
-                    temperature=0.7,
+                    temperature=0.3,  # Lower temperature for more consistent responses
                     max_tokens=200,  # Allow natural conversational responses
                 )
                 content = llm_response.get("content", "").strip()
+                
+                # Clean any reasoning content
+                content = self._clean_reasoning_text(content)
                 
                 if not content:
                     content = "I'd be happy to help you track your shipment! Please provide your AWB (tracking) number, and I'll get the latest status for you."
@@ -222,10 +509,12 @@ class SMSAAIAssistantTrackingAgent(SMSAAIAssistantBaseAgent):
                 llm_response = await self._llm_client.chat_completion(
                     messages=[{"role": "user", "content": f"User asked: {message}\n\nError occurred: {str(e)}"}],
                     system_prompt=system_prompt,
-                    temperature=0.7,
+                    temperature=0.3,  # Lower temperature for more consistent responses
                     max_tokens=150,
                 )
                 error_message = llm_response.get("content", "").strip() or error_message
+                # Clean any reasoning content
+                error_message = self._clean_reasoning_text(error_message)
             except Exception:
                 pass  # Use default error message
             
@@ -270,36 +559,13 @@ Generate a helpful, conversational response about the shipment status. Start wit
             llm_response = await self._llm_client.chat_completion(
                 messages=[{"role": "user", "content": user_message}],
                 system_prompt=system_prompt,
-                temperature=0.7,
+                temperature=0.3,  # Lower temperature for more consistent responses
                 max_tokens=400,  # Reduced from 600 for faster responses (structured data handles details)
             )
             content = llm_response.get("content", "").strip()
             
-            # Additional cleanup: remove any remaining reasoning content (defense in depth)
-            # The LLM client already cleans, but we do it again here as a safety measure
-            # This ensures no reasoning leaks through
-            if content:
-                # Remove sentences that start with reasoning patterns
-                import re
-                lines = content.split('\n')
-                cleaned_lines = []
-                for line in lines:
-                    line_lower = line.lower().strip()
-                    # Skip lines that are clearly reasoning
-                    reasoning_starters = [
-                        'okay', 'i need to', 'let me', 'first', 'i should', 'maybe',
-                        'also', 'the rules', 'the example', 'let me check', 'let me see',
-                        'since', 'i should make sure', 'let me structure', 'wts is this'
-                    ]
-                    if not any(line_lower.startswith(starter) for starter in reasoning_starters):
-                        cleaned_lines.append(line)
-                content = '\n'.join(cleaned_lines).strip()
-                
-                # Also remove tagged reasoning
-                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                content = content.strip()
+            # Clean any reasoning content
+            content = self._clean_reasoning_text(content)
             
             if not content:
                 # Fallback to formatted lines

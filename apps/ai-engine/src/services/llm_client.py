@@ -63,6 +63,54 @@ class SMSAAIAssistantLLMClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def chat_completion_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 2000,
+        system_prompt: Optional[str] = None,
+    ):
+        """
+        Send a streaming chat completion request to the LLM.
+        
+        Returns an async iterator of token chunks.
+        """
+        logger.debug("llm_stream_start", model=self.model, api_url=self.api_url, messages_count=len(messages))
+        
+        session = await self._get_session()
+
+        # Prepend system prompt if provided
+        payload_messages = messages.copy()
+        if system_prompt:
+            payload_messages.insert(0, {"role": "system", "content": system_prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": payload_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        logger.debug("llm_stream_request", payload_preview=str(payload)[:200])
+
+        try:
+            # Return the async iterator directly
+            chunk_count = 0
+            async for chunk in self._stream_completion(session, payload, headers):
+                chunk_count += 1
+                logger.debug("llm_stream_chunk_received", chunk_num=chunk_count, content=chunk.get("content", "")[:50])
+                yield chunk
+            logger.info("llm_stream_success", total_chunks=chunk_count)
+        except Exception as e:
+            logger.error("llm_stream_error", error=str(e), exc_info=True)
+            raise
+
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -70,20 +118,19 @@ class SMSAAIAssistantLLMClient:
         max_tokens: int = 2000,
         stream: bool = False,
         system_prompt: Optional[str] = None,
-    ) -> Dict[str, Any] | AsyncIterator[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
-        Send a chat completion request to the LLM.
+        Send a chat completion request to the LLM (non-streaming).
 
         Args:
             messages: List of message dicts with 'role' and 'content'
             temperature: Sampling temperature (0.0-2.0)
             max_tokens: Maximum tokens to generate
-            stream: Whether to stream the response
+            stream: Whether to stream the response (ignored, use chat_completion_stream for streaming)
             system_prompt: Optional system prompt to prepend
 
         Returns:
-            Dict with 'content' and 'usage' if not streaming,
-            AsyncIterator of token dicts if streaming
+            Dict with 'content' and 'usage'
         """
         session = await self._get_session()
 
@@ -98,20 +145,13 @@ class SMSAAIAssistantLLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        
-        # Only include 'stream' if it's True (Huawei API doesn't accept stream: false)
-        if stream:
-            payload["stream"] = True
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
 
-        if stream:
-            return self._stream_completion(session, payload, headers)
-        else:
-            return await self._non_stream_completion(session, payload, headers)
+        return await self._non_stream_completion(session, payload, headers)
 
     async def _non_stream_completion(
         self,
@@ -279,6 +319,22 @@ class SMSAAIAssistantLLMClient:
                         delta = data["choices"][0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
+                            # Aggressive reasoning filter at LLM client level
+                            content_lower = content.lower()
+                            
+                            # Skip reasoning patterns completely
+                            reasoning_indicators = [
+                                "hi, the user", "the user sent", "according to", "the guidelines",
+                                "i should respond", "i should", "let me", "okay,", "alright,",
+                                "the rules", "no need to mention", "just a straightforward",
+                                "the main thing is", "should i point", "probably not",
+                                "just respond as if", "keep it friendly", "make sure to use",
+                                "just follow the script", "provided in the rules"
+                            ]
+                            
+                            if any(indicator in content_lower for indicator in reasoning_indicators):
+                                continue
+                            
                             yield {
                                 "content": content,
                                 "finish_reason": data["choices"][0].get("finish_reason"),

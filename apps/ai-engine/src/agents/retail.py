@@ -111,6 +111,407 @@ class SMSAAIAssistantRetailCentersAgent(SMSAAIAssistantBaseAgent):
         super().__init__()
         self._client = SMSAAIAssistantSMSARetailCentersClient()
         self._llm_client = SMSAAIAssistantLLMClient()
+        self._inside_thinking = False  # Track if we're inside thinking tags
+
+    def _filter_thinking_content(self, content: str) -> str:
+        """
+        Filter out thinking tags and content within them using stateful tracking.
+        """
+        if not content:
+            return content
+            
+        # Check for thinking tag start
+        if "<think>" in content.lower():
+            self._inside_thinking = True
+            # Remove the opening tag and everything after it in this chunk
+            content = content[:content.lower().find("<think>")]
+            
+        # If we're inside thinking tags, filter out all content
+        if self._inside_thinking:
+            # Check for thinking tag end
+            if "</think>" in content.lower():
+                self._inside_thinking = False
+                # Keep only content after the closing tag
+                end_pos = content.lower().find("</think>") + len("</think>")
+                content = content[end_pos:]
+            else:
+                # We're still inside thinking, filter out all content
+                return ""
+        
+        return content
+
+    def _clean_reasoning_text(self, text: str) -> str:
+        """
+        Clean any remaining reasoning or meta-commentary from the response.
+        """
+        if not text:
+            return text
+            
+        # Remove common reasoning patterns that might slip through
+        reasoning_phrases = [
+            "Check if the VAT is calculated correctly.",
+            "For SPOP:", "For SSB:",
+            "That's correct.",
+            "Finally,", "Also,",
+            "I should also mention",
+            "Make sure the response is concise",
+            "Avoid any markdown",
+            "Alright, that should cover",
+            "Let me check", "Let me see",
+            "I need to", "I have to",
+            "The user asked", "According to",
+        ]
+        
+        for phrase in reasoning_phrases:
+            text = text.replace(phrase, "")
+        
+        # Clean up any remaining calculation explanations
+        import re
+        # Remove calculation patterns like "122.00 * 0.15 = 18.30"
+        text = re.sub(r'\d+\.\d+\s*\*\s*0\.\d+\s*=\s*\d+\.\d+,?\s*', '', text)
+        
+        # Remove "which matches/rounds to" explanations
+        text = re.sub(r',?\s*which\s+(matches|rounds\s+to)\s+[^.]*\.', '', text)
+        
+        # Clean up extra whitespace and newlines
+        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Multiple newlines to double
+        text = text.strip()
+        
+        return text
+
+    def _is_conversational_query(self, message: str) -> bool:
+        """
+        Check if the user is asking a conversational question rather than looking for service centers.
+        
+        This prevents simple greetings from triggering location searches.
+        """
+        lower_msg = message.lower().strip()
+        
+        # Simple greetings - check if message STARTS with or CONTAINS these
+        greeting_starters = [
+            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+            "greetings", "salaam", "salam"
+        ]
+        
+        # Check if message starts with any greeting
+        for greeting in greeting_starters:
+            if lower_msg.startswith(greeting):
+                return True
+        
+        # Check for "how are you" anywhere in the message
+        if "how are you" in lower_msg:
+            return True
+            
+        # Check for other conversational phrases
+        conversational_phrases = [
+            "what's up", "how you doing", "how are you doing", "how's it going",
+            "good to see you", "nice to meet you", "pleasure to meet you"
+        ]
+        
+        for phrase in conversational_phrases:
+            if phrase in lower_msg:
+                return True
+        
+        # Questions about capabilities
+        capability_questions = [
+            "what can you do", "how can you help", "what do you do", "help me",
+            "what are your capabilities", "what services", "how does this work",
+            "what is this", "who are you", "what are you"
+        ]
+        if any(q in lower_msg for q in capability_questions):
+            return True
+        
+        # General questions without location keywords
+        location_keywords = [
+            "center", "centres", "branch", "office", "location", "address", "near",
+            "city", "area", "post code", "postal code", "zip", "find", "search",
+            "riyadh", "jeddah", "dammam", "khobar", "makkah", "madinah"
+        ]
+        
+        # If message is very short and has no location keywords, it's likely conversational
+        if len(lower_msg.split()) <= 5 and not any(keyword in lower_msg for keyword in location_keywords):
+            return True
+        
+        return False
+
+    def _extract_center_count(self, message: str) -> int:
+        """
+        Extract the number of centers requested by the user.
+        Returns the requested count or default of 5.
+        """
+        lower_msg = message.lower()
+        
+        # Look for patterns like "5 centers", "show 3", "find 10 centers", etc.
+        patterns = [
+            r'(\d+)\s*centers?',
+            r'(\d+)\s*centres?',
+            r'show\s*(\d+)',
+            r'find\s*(\d+)',
+            r'get\s*(\d+)',
+            r'(\d+)\s*only',
+            r'top\s*(\d+)',
+            r'first\s*(\d+)',
+            r'(\d+)\s*nearest',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, lower_msg)
+            if match:
+                try:
+                    count = int(match.group(1))
+                    # Reasonable limits: minimum 1, maximum 20
+                    if 1 <= count <= 20:
+                        return count
+                except ValueError:
+                    continue
+        
+        # Default to 5 centers if no specific number requested
+        return 5
+
+    async def run_stream(self, context: Dict[str, Any]):
+        """
+        Streaming variant of the retail centers agent with proper LLM streaming.
+        """
+        # Reset thinking state for new request
+        self._inside_thinking = False
+        
+        message: str = context.get("message", "")
+        
+        # Check if this is a simple greeting or conversational query (not location-based)
+        if self._is_conversational_query(message):
+            logger.info("retail_conversational_request", message_preview=message[:100])
+            
+            # Use LLM for conversational responses
+            system_prompt = """You are a helpful AI assistant for SMSA Express service centers.
+
+CRITICAL: Do NOT use any thinking tags like <think>, </think>, <reasoning>, or </reasoning>. 
+Respond directly to customers without showing any internal reasoning or thought process.
+
+You help customers find SMSA service centers and retail locations. 
+For greetings, respond warmly and explain how you can help.
+For questions about services, provide helpful information.
+Keep responses concise and friendly.
+Use plain text format only, no markdown formatting.
+
+Examples:
+- User: "Hi" → "Hello! I'm here to help you find SMSA Express service centers. You can ask me to find centers by city, area, or post code. How can I assist you?"
+- User: "What can you do?" → "I can help you locate SMSA Express service centers across Saudi Arabia and other countries. Just tell me your city, area, or post code and I'll find the nearest centers for you."
+"""
+            
+            try:
+                # Stream LLM response
+                chunk_count = 0
+                async for chunk in self._llm_client.chat_completion_stream(
+                    messages=[{"role": "user", "content": message}],
+                    system_prompt=system_prompt,
+                    temperature=0.3,  # Lower temperature for more consistent responses
+                    max_tokens=200,
+                ):
+                    chunk_count += 1
+                    content = chunk.get("content", "")
+                    
+                    # Apply stateful thinking filter first
+                    content = self._filter_thinking_content(content)
+                    
+                    # Additional reasoning filter for streaming
+                    if content:
+                        content_lower = content.lower().strip()
+                        reasoning_patterns = [
+                            "hi, the user", "the user sent", "according to", "the guidelines", 
+                            "i should respond", "i should", "let me", "okay,", "alright,", 
+                            "first,", "maybe", "the rules", "let me check", "let me make sure", 
+                            "i'll structure", "the response should", "no need to mention",
+                            "just a straightforward", "the main thing is", "should i point",
+                            "probably not", "just respond as if", "keep it friendly",
+                            "yes, the example", "make sure to use", "just follow the script",
+                            "provided in the rules"
+                        ]
+                        
+                        # Skip if content contains reasoning patterns
+                        if any(pattern in content_lower for pattern in reasoning_patterns):
+                            continue
+                        
+                        # Skip if content is just reasoning words or phrases
+                        reasoning_words = ["okay", "alright", "yes", "no", "hmm", "well", "so"]
+                        if content_lower.strip() in reasoning_words and chunk_count < 20:
+                            continue
+                        
+                        # Skip very long sentences that look like reasoning (over 100 chars and contains reasoning keywords)
+                        if len(content) > 100 and any(word in content_lower for word in ["guidelines", "rules", "should", "need to", "according"]):
+                            continue
+                    
+                    # Only yield if content is not empty and not reasoning
+                    if content:
+                        yield {
+                            "type": "token",
+                            "content": content,
+                            "metadata": {
+                                "agent": self.name,
+                                "type": "conversational",
+                                "centers": [],
+                                "location_info": None,
+                                "city": None,
+                                "needs_clarification": False,
+                            },
+                        }
+                        
+            except Exception as e:
+                logger.warning("retail_conversational_stream_failed", error=str(e))
+                fallback = "Hello! I'm here to help you find SMSA Express service centers. You can ask me to find centers by city, area, or post code. How can I assist you?"
+                yield {
+                    "type": "token",
+                    "content": fallback,
+                    "metadata": {
+                        "agent": self.name,
+                        "type": "conversational",
+                        "centers": [],
+                        "location_info": None,
+                        "city": None,
+                        "needs_clarification": False,
+                    },
+                }
+            return
+        
+        # For location-based queries, do the work ONCE (no double processing)
+        # Extract requested count first
+        requested_count = self._extract_center_count(message)
+        
+        # Quick location classification with fallback
+        logger.info("retail_classifying_location", message=message)
+        
+        # Simple fallback: if message contains "riyadh", use it directly
+        lower_msg = message.lower()
+        if "riyadh" in lower_msg:
+            location_info = {
+                "city_name": "Riyadh",
+                "location_type": "city_name",
+                "needs_clarification": False
+            }
+            logger.info("retail_location_fallback", location_info=location_info)
+        else:
+            location_info = await self._classify_location_with_llm(message)
+            logger.info("retail_location_classified", location_info=location_info)
+        
+        if location_info.get("needs_clarification"):
+            clarification_question = location_info.get("clarification_question") or \
+                "I need more information about your location. Could you please specify the city or area?"
+            
+            # Stream clarification directly (no LLM delay)
+            for char in clarification_question:
+                if char:
+                    yield {
+                        "type": "token",
+                        "content": char,
+                        "metadata": {
+                            "agent": self.name,
+                            "type": "conversational",
+                            "centers": [],
+                            "location_info": location_info,
+                            "city": None,
+                            "needs_clarification": True,
+                        },
+                    }
+            return
+        
+        # Get city and fetch centers (main API work)
+        city = location_info.get("city_name") or "Riyadh"
+        logger.info("retail_fetching_centers", city=city, location_info=location_info)
+        result = await self._client.list_of_centers(city=city, country="SA")
+        logger.info("retail_api_result", success=result.get("success"), centers_count=len(result.get("centers", [])), error=result.get("error_message"))
+        
+        if not result.get("success") or not result.get("centers"):
+            error_msg = f"I couldn't find any SMSA service centers in {city}. Please try a different city or contact SMSA support."
+            # Add more specific error information
+            if result.get("error_message"):
+                error_msg = f"I encountered an issue while searching for centers in {city}: {result.get('error_message')}. Please try again or contact SMSA support."
+            
+            for char in error_msg:
+                if char:
+                    yield {
+                        "type": "token",
+                        "content": char,
+                        "metadata": {
+                            "agent": self.name,
+                            "type": "error",
+                            "centers": [],
+                            "location_info": location_info,
+                            "city": city,
+                        },
+                    }
+            return
+        
+        # Process and limit centers
+        centers = result.get("centers", [])
+        reference_lat, reference_lon = await self._get_user_location_coords(location_info, city=city)
+        centers = self._calculate_distances(centers, reference_lat, reference_lon)
+        
+        if reference_lat and reference_lon:
+            centers = self._filter_nearest_centers(centers, max_results=max(requested_count, 10))
+        else:
+            centers = centers[:max(requested_count, 10)]
+        
+        # Limit to exactly what user requested
+        limited_centers = centers[:requested_count]
+        
+        # Create clean, well-formatted response with explicit formatting
+        response_parts = []
+        response_parts.append(f"Here are {len(limited_centers)} SMSA service centers in {city}:")
+        response_parts.append("")  # Empty line
+        
+        for i, center in enumerate(limited_centers, 1):
+            # Extract and clean center data
+            name = center.get("name", center.get("centerName", "SMSA Center"))
+            address = center.get("address", center.get("fullAddress", "Address not available"))
+            phone = center.get("phone", center.get("phoneNumber", "920009999"))
+            distance = center.get("distance_km")
+            hours = center.get("workingHours", center.get("hours", "8:00-23:00 (Saturday to Thursday)"))
+            
+            # Build center info as a block
+            center_block = f"{i}. {name}\n"
+            center_block += f"   Address: {address}\n"
+            center_block += f"   Phone: {phone}\n"
+            if distance and distance > 0:
+                center_block += f"   Distance: {distance:.2f} km\n"
+            if hours and hours != "Address not available":
+                center_block += f"   Hours: {hours}\n"
+            
+            response_parts.append(center_block.rstrip())  # Remove trailing newline
+            response_parts.append("")  # Empty line between centers
+        
+        response_parts.append("Need more details about any center? Just let me know!")
+        
+        # Stream each part separately to preserve formatting
+        for part in response_parts:
+            if part == "":
+                # Send empty line
+                yield {
+                    "type": "token", 
+                    "content": "\n",
+                    "metadata": {
+                        "agent": self.name,
+                        "type": "location_result",
+                        "centers": limited_centers,
+                        "location_info": location_info,
+                        "city": city,
+                        "needs_clarification": False,
+                        "requested_count": requested_count,
+                    },
+                }
+            else:
+                # Send content with newline
+                yield {
+                    "type": "token", 
+                    "content": part + "\n",
+                    "metadata": {
+                        "agent": self.name,
+                        "type": "location_result",
+                        "centers": limited_centers,
+                        "location_info": location_info,
+                        "city": city,
+                        "needs_clarification": False,
+                        "requested_count": requested_count,
+                    },
+                }
 
     def _extract_location_info(self, message: str) -> Dict[str, Any]:
         """
@@ -735,10 +1136,13 @@ Return ONLY the JSON object, no other text."""
         self, message: str, context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Handle location-based query - existing flow with geocoding and distance calculation."""
-        # Step 1: Classify location information
+        # Step 1: Extract requested number of centers
+        requested_count = self._extract_center_count(message)
+        
+        # Step 2: Classify location information
         location_info = await self._classify_location_with_llm(message)
         
-        # Step 2: Check if clarification is needed
+        # Step 3: Check if clarification is needed
         if location_info.get("needs_clarification"):
             clarification_question = location_info.get("clarification_question") or \
                 "I need more information about your location. Could you please specify the city or area?"
@@ -749,9 +1153,10 @@ Return ONLY the JSON object, no other text."""
                 "centers": [],
                 "needs_clarification": True,
                 "location_info": location_info,
+                "requested_count": requested_count,
             }
         
-        # Step 3: Determine city
+        # Step 4: Determine city
         city = location_info.get("city_name")
         if not city:
             # Try to get city from parameters or extract from message
@@ -761,8 +1166,10 @@ Return ONLY the JSON object, no other text."""
                 # For now, default to Riyadh if unclear
                 city = "Riyadh"  # Default, could be improved with geocoding
         
-        # Step 4: Get centers from API
+        # Step 5: Get centers from API
+        logger.info("retail_run_fetching_centers", city=city, location_info=location_info)
         result = await self._client.list_of_centers(city=city, country="SA")
+        logger.info("retail_run_api_result", success=result.get("success"), centers_count=len(result.get("centers", [])), error=result.get("error_message"))
         
         if not result.get("success"):
             error_msg = result.get("error_message", "Unknown error")
@@ -770,6 +1177,7 @@ Return ONLY the JSON object, no other text."""
                 "agent": self.name,
                 "content": f"I couldn't retrieve service centers at this time. Error: {error_msg}",
                 "centers": [],
+                "requested_count": requested_count,
             }
 
         centers = result.get("centers", [])
@@ -780,35 +1188,47 @@ Return ONLY the JSON object, no other text."""
                 "agent": self.name,
                 "content": f"No SMSA service centers found{location_text}. Please try a different city or contact SMSA support.",
                 "centers": [],
+                "requested_count": requested_count,
             }
 
-        # Step 5: Get user location coordinates for distance calculation
+        # Step 6: Get user location coordinates for distance calculation
         reference_lat, reference_lon = await self._get_user_location_coords(
             location_info, city=city
         )
 
-        # Step 6: Calculate distances from user location to each center
+        # Step 7: Calculate distances from user location to each center
         centers = self._calculate_distances(centers, reference_lat, reference_lon)
 
-        # Step 7: Filter to top 5-10 nearest centers
+        # Step 8: Filter to requested number of centers (or default to 10 if more than requested)
+        max_results = max(requested_count, 10)  # Get at least 10 for sorting, then limit to requested
         if reference_lat and reference_lon:
             # We have user location, filter by distance
-            centers = self._filter_nearest_centers(centers, max_results=10)
+            centers = self._filter_nearest_centers(centers, max_results=max_results)
         else:
-            # No user location, just take first 10
-            centers = centers[:10]
+            # No user location, just take first max_results
+            centers = centers[:max_results]
         
-        # Step 8: Format response using LLM
-        system_prompt = self.system_prompt or """You are a helpful AI assistant for SMSA Express service centers.
+        # Step 9: Format response using LLM
+        system_prompt = """You are a helpful AI assistant for SMSA Express service centers.
 Generate a friendly, clear, and informative response about SMSA service center locations.
-- If multiple centers are found, mention the top 5-10 nearest ones
+
+CRITICAL: Do NOT use any thinking tags like <think>, </think>, <reasoning>, or </reasoning>. 
+Respond directly to customers without showing any internal reasoning or thought process.
+
+Guidelines:
+- Show exactly the number of centers the user requested
 - Include important details: address, phone, hours
 - Be conversational and helpful
 - If distance information is available, mention it naturally
 - Format the response clearly with line breaks between centers
-- alway stick to the user intent, if he ask for the other thing then please remind those thing to him what he has already"""
+- Always stick to the user intent, if they ask for other things then please remind them what they have already asked
+- Use plain text format, no markdown formatting
+- Be concise and professional"""
 
         import json
+        # Limit to exactly what the user requested
+        limited_centers = centers[:requested_count]
+        
         user_message = f"""User asked: {message}
 
 Location information extracted:
@@ -816,26 +1236,28 @@ Location information extracted:
 - City: {city}
 - Area: {location_info.get('area_name', 'N/A')}
 - Post Code: {location_info.get('post_code', 'N/A')}
+- Requested count: {requested_count}
 
-Service centers found ({len(centers)} total):
-{json.dumps(centers[:10], indent=2)}
+Service centers found ({len(centers)} total, showing {len(limited_centers)}):
+{json.dumps(limited_centers, indent=2)}
 
 Generate a helpful, conversational response about these service centers. 
-If there are many centers, focus on the most relevant ones.
-Include address, phone, and hours for each center mentioned."""
+Show exactly {requested_count} centers as the user requested.
+Include address, phone, and hours for each center mentioned.
+
+IMPORTANT: Respond directly to the customer. Do not show any thinking process, reasoning, or meta-commentary."""
 
         try:
             llm_response = await self._llm_client.chat_completion(
                 messages=[{"role": "user", "content": user_message}],
                 system_prompt=system_prompt,
-                temperature=0.7,
+                temperature=0.3,  # Lower temperature for more consistent responses
                 max_tokens=600,
             )
             content = llm_response.get("content", "").strip()
             
-            # Clean reasoning content
-            content = self._llm_client._clean_reasoning_content(content)
-            
+            # Don't apply heavy reasoning cleanup for retail agent
+            # Just basic cleanup if needed
             if not content:
                 # Fallback to formatted response
                 content = self._format_centers(centers[:10])
@@ -847,9 +1269,10 @@ Include address, phone, and hours for each center mentioned."""
         return {
             "agent": self.name,
             "content": content,
-            "centers": centers[:10],  # Return top 10
+            "centers": limited_centers,  # Return exactly what user requested
             "location_info": location_info,
             "city": city,
+            "requested_count": requested_count,
         }
 
     async def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -871,6 +1294,55 @@ Include address, phone, and hours for each center mentioned."""
             message=message[:100],
             conversation_id=conversation_id,
         )
+
+        # Check if this is a conversational query (greeting, help, etc.)
+        if self._is_conversational_query(message):
+            logger.info("retail_conversational_request", message_preview=message[:100])
+            
+            # Use LLM for conversational responses
+            system_prompt = """You are a helpful AI assistant for SMSA Express service centers.
+
+CRITICAL: Do NOT use any thinking tags like <think>, </think>, <reasoning>, or </reasoning>. 
+Respond directly to customers without showing any internal reasoning or thought process.
+
+You help customers find SMSA service centers and retail locations. 
+For greetings, respond warmly and explain how you can help.
+For questions about services, provide helpful information.
+Keep responses concise and friendly.
+Use plain text format only, no markdown formatting.
+
+Examples:
+- User: "Hi" → "Hello! I'm here to help you find SMSA Express service centers. You can ask me to find centers by city, area, or post code. How can I assist you?"
+- User: "What can you do?" → "I can help you locate SMSA Express service centers across Saudi Arabia and other countries. Just tell me your city, area, or post code and I'll find the nearest centers for you."
+"""
+            
+            try:
+                llm_response = await self._llm_client.chat_completion(
+                    messages=[{"role": "user", "content": message}],
+                    system_prompt=system_prompt,
+                    temperature=0.3,  # Lower temperature for more consistent responses
+                    max_tokens=200,
+                )
+                content = llm_response.get("content", "").strip()
+                
+                # Clean any reasoning content
+                content = self._clean_reasoning_text(content)
+                
+                if not content:
+                    content = "Hello! I'm here to help you find SMSA Express service centers. You can ask me to find centers by city, area, or post code. How can I assist you?"
+                    
+            except Exception as e:
+                logger.warning("retail_conversational_response_failed", error=str(e))
+                content = "Hello! I'm here to help you find SMSA Express service centers. You can ask me to find centers by city, area, or post code. How can I assist you?"
+            
+            return {
+                "agent": self.name,
+                "content": content,
+                "centers": [],
+                "needs_clarification": False,
+                "location_info": None,
+                "city": None,
+            }
 
         try:
             # Step 1: Classify query intent

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
 
 from .models.tracking import ChatMessageRequest, TrackingSseEvent, TrackingSseMetadata
-from .orchestrator.router import route_message
+from .orchestrator.router import route_message, route_message_stream
 from .services.storage import SMSAAIAssistantStorageClient
 from .services.vision_client import SMSAAIAssistantVisionClient
 from .logging_config import logger
@@ -28,6 +28,7 @@ async def _stream_tracking_response(
 ) -> AsyncIterator[bytes]:
     """
     Wraps the orchestrator response in a text/event-stream compatible generator.
+    Now supports true character-by-character streaming from LLM.
     """
     # Validate file upload: only allow for tracking agent
     file_id = None
@@ -53,52 +54,60 @@ async def _stream_tracking_response(
         "selected_agent": body.selected_agent,
         "file_id": file_id,
         "file_url": file_url,
+        "stream": True,  # Enable streaming
     }
 
-    result = await route_message(context)
+    # Get agent name and metadata from route_message_stream
+    agent_name = "system"
+    result_metadata = {}
+    
+    # Stream tokens from orchestrator
+    async for chunk in route_message_stream(context):
+        if chunk.get("type") == "metadata":
+            # First chunk contains agent name and metadata
+            agent_name = chunk.get("agent", "system")
+            result_metadata = chunk.get("metadata", {})
+            continue
+        
+        # Normalize agent name to match TrackingSseMetadata expected values
+        agent_name_map = {
+            "retail_centers": "retail",
+            "tracking": "tracking",
+            "rates": "rates",
+            "faq": "faq",
+            "system": "system",
+        }
+        normalized_agent_name = agent_name_map.get(agent_name, "system")
+        
+        metadata = TrackingSseMetadata(
+            agent=normalized_agent_name,  # type: ignore[arg-type]
+            timestamp=datetime.utcnow(),
+            conversationId=body.conversation_id,  # type: ignore[call-arg]
+        )
 
-    # Get agent name from result, default to "tracking" for backwards compatibility
-    agent_name = result.get("agent", "tracking")
-    
-    # Normalize agent name to match TrackingSseMetadata expected values
-    # Map internal agent names to frontend-expected names
-    agent_name_map = {
-        "retail_centers": "retail",
-        "tracking": "tracking",
-        "rates": "rates",
-        "faq": "faq",
-        "system": "system",
-    }
-    normalized_agent_name = agent_name_map.get(agent_name, "system")
-    
-    # Extract metadata (may contain structured data like tracking events)
-    result_metadata = result.get("metadata", {})
-    
+        # Stream token event
+        token_event = TrackingSseEvent(
+            type="token",
+            content=chunk.get("content", ""),
+            metadata=metadata,
+        )
+        
+        # Add structured data to the event (for tracking events, etc.)
+        event_dict = token_event.model_dump_json(by_alias=True)
+        event_json = json.loads(event_dict)
+        
+        # Merge structured data from result metadata into event
+        if result_metadata:
+            event_json["metadata"] = {**event_json.get("metadata", {}), **result_metadata}
+        
+        yield f"data: {json.dumps(event_json)}\n\n".encode("utf-8")
+
+    # Done event
     metadata = TrackingSseMetadata(
         agent=normalized_agent_name,  # type: ignore[arg-type]
         timestamp=datetime.utcnow(),
         conversationId=body.conversation_id,  # type: ignore[call-arg]
     )
-
-    # Single token event with the full message content
-    # Include structured data in metadata for frontend rendering
-    token_event = TrackingSseEvent(
-        type="token",
-        content=result.get("content", ""),
-        metadata=metadata,
-    )
-    
-    # Add structured data to the event (for tracking events, etc.)
-    event_dict = token_event.model_dump_json(by_alias=True)
-    event_json = json.loads(event_dict)
-    
-    # Merge structured data from result metadata into event
-    if result_metadata:
-        event_json["metadata"] = {**event_json.get("metadata", {}), **result_metadata}
-    
-    yield f"data: {json.dumps(event_json)}\n\n".encode("utf-8")
-
-    # Done event
     done_event = TrackingSseEvent(
         type="done",
         content="",
@@ -169,12 +178,13 @@ async def upload_file(
         if is_image:
             try:
                 logger.info("processing_image_with_vision", object_key=object_key)
-                # Extract AWB and shipment details from image
+                # OPTIMIZED: Extract only AWB for faster processing
                 extracted_data = await _vision_client.extract_awb_from_image(file_bytes)
                 logger.info(
                     "vision_extraction_complete",
                     object_key=object_key,
                     awb=extracted_data.get("awb"),
+                    processing_time="optimized_for_speed"
                 )
                 
                 # Store file metadata with extracted data in conversation context

@@ -37,11 +37,24 @@ class SMSAAIAssistantDatabaseManager:
             connection_string: MongoDB connection string (defaults to settings)
         """
         self.connection_string = connection_string or settings.mongodb_uri
+        # Allow MongoDB to be disabled completely for local/dev environments
+        # Set MONGODB_URI=disabled (or "none"/empty) in .env to skip all DB calls.
+        disabled_markers = {"", "disabled", "none", "off", "false"}
+        self._enabled = str(self.connection_string).strip().lower() not in disabled_markers
         self._client: Optional[AsyncIOMotorClient] = None
         self._db: Optional[AsyncIOMotorDatabase] = None
 
     async def connect(self) -> None:
-        """Connect to MongoDB."""
+        """Connect to MongoDB.
+
+        If MongoDB is disabled via MONGODB_URI, this raises immediately so that
+        callers can fall back to in-memory behavior without long network timeouts.
+        """
+        if not self._enabled:
+            from ..logging_config import logger
+            logger.warning("mongodb_disabled", connection_string=str(self.connection_string))
+            raise RuntimeError("MongoDB is disabled via MONGODB_URI")
+
         if self._client is None:
             self._client = AsyncIOMotorClient(self.connection_string)
             # Extract database name from connection string or use default

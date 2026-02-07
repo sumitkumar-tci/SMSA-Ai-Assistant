@@ -754,12 +754,13 @@ export default function HomePage() {
           setMessages((prev) => {
             const lastMessage = prev[prev.length - 1];
             if (lastMessage && lastMessage.role === "bot" && lastMessage.id.startsWith("bot-")) {
-              // Update existing bot message
+              // Update existing bot message - APPEND new content for streaming
+              const newContent = lastMessage.content + event.content;
               return prev.map((msg, idx) => 
                 idx === prev.length - 1 
                   ? { 
                       ...msg, 
-                      content: event.content,
+                      content: newContent,
                       trackingData: event.metadata?.raw_data || msg.trackingData,
                       retailCentersData: retailCentersData || msg.retailCentersData,
                       messageType: messageType,
