@@ -30,8 +30,8 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - AI_ENGINE_URL=http://ai-engine:8000/orchestrator/chat
-      - AI_ENGINE_BASE_URL=http://ai-engine:8000
+      - AI_ENGINE_URL=http://localhost:8000/orchestrator/chat
+      - AI_ENGINE_BASE_URL=http://localhost:8000
       - PORT=3000
     env_file:
       - .env
@@ -52,8 +52,7 @@ services:
       context: .
       dockerfile: Dockerfile.ai-engine
     container_name: smsa-ai-engine
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
       - PYTHONUNBUFFERED=1
     env_file:
@@ -61,8 +60,6 @@ services:
     volumes:
       - ./data_for_faq:/app/data_for_faq:ro
       - ./.env:/app/.env:ro
-    networks:
-      - smsa-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
