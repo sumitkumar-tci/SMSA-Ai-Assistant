@@ -30,8 +30,8 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - AI_ENGINE_URL=http://localhost:8000/orchestrator/chat
-      - AI_ENGINE_BASE_URL=http://localhost:8000
+      - AI_ENGINE_URL=http://172.17.0.1:8000/orchestrator/chat
+      - AI_ENGINE_BASE_URL=http://172.17.0.1:8000
       - PORT=3000
     env_file:
       - .env
