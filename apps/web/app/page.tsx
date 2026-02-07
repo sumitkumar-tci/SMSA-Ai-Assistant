@@ -57,11 +57,21 @@ function cleanReasoningContent(content: string): string {
 }
 
 // Function to render markdown-like content (convert **bold** to <strong>, etc.)
+// Escape HTML to prevent XSS attacks
+function escapeHtml(text: string): string {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function renderMarkdown(text: string): string {
   if (!text) return text;
   
+  // First escape HTML to prevent XSS
+  const escaped = escapeHtml(text);
+  
   // Convert **bold** to <strong>
-  let html = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  let html = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
   // Convert *italic* to <em> (but not if it's part of **bold**)
   html = html.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
   // Convert line breaks
@@ -503,6 +513,32 @@ export default function HomePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUpload = async (file: File) => {
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      const errorMessage: Message = {
+        id: Date.now().toString(),
+        role: "bot",
+        content: `❌ Invalid file type. Please upload an image (JPEG, PNG, GIF, or WebP).`,
+        messageType: "error",
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (file.size > maxSize) {
+      const errorMessage: Message = {
+        id: Date.now().toString(),
+        role: "bot",
+        content: `❌ File too large. Maximum size is 10MB.`,
+        messageType: "error",
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+      return;
+    }
+
     setIsUploading(true);
     
     // Show initial upload message
@@ -531,10 +567,27 @@ export default function HomePage() {
       ));
       setLoadingState("processing");
 
-      const response = await fetch("http://localhost:3001/api/upload", {
-        method: "POST",
-        body: formData,
-      });
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      
+      // Create AbortController for request timeout (longer for uploads with processing)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 second timeout for upload (image processing takes time)
+      
+      let response: Response;
+      try {
+        response = await fetch(`${apiUrl}/api/upload`, {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error("Upload timed out. The file may be too large or processing is taking too long.");
+        }
+        throw error;
+      }
 
       if (!response.ok) {
         throw new Error(`Upload failed: ${response.statusText}`);
@@ -621,10 +674,22 @@ export default function HomePage() {
     } catch (error) {
       console.error("Upload error:", error);
       setLoadingState("idle");
+      
+      let errorMessageText = "Upload failed. Please try again.";
+      if (error instanceof Error) {
+        if (error.name === 'AbortError' || error.message.includes('aborted')) {
+          errorMessageText = "Upload timed out. The file may be too large or processing is taking too long. Please try a smaller file.";
+        } else if (error.message.includes('timeout')) {
+          errorMessageText = "Upload timed out. Please try again.";
+        } else {
+          errorMessageText = `Upload failed: ${error.message}`;
+        }
+      }
+      
       const errorMessage: Message = {
         id: Date.now().toString(),
         role: "bot",
-        content: `❌ Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        content: `❌ ${errorMessageText}`,
         messageType: "error",
       };
       setMessages((prev) => [...prev, errorMessage]);
@@ -668,8 +733,14 @@ export default function HomePage() {
     setMessages((prev) => [...prev, userMessage]);
 
     try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      
+      // Create AbortController for request timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+      
       const response = await fetch(
-        `http://localhost:3001/api/messages/${encodeURIComponent(
+        `${apiUrl}/api/messages/${encodeURIComponent(
           currentConversationId
         )}/stream`,
         {
@@ -681,8 +752,11 @@ export default function HomePage() {
             fileId: selectedAgent === "tracking" ? (uploadedFileId || undefined) : undefined,
             fileUrl: selectedAgent === "tracking" && uploadedFileId ? undefined : undefined,
           }),
+          signal: controller.signal,
         }
       );
+      
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`Gateway error: ${response.status} ${response.statusText}`);
@@ -811,12 +885,22 @@ export default function HomePage() {
     setIsSending(false);
     } catch (error) {
       console.error("Fetch error:", error);
+      let errorMessageText = "Failed to connect to gateway. Please try again.";
+      
+      if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+          errorMessageText = "Request timed out. Please try again.";
+        } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          errorMessageText = "Network error. Please check your connection and ensure the gateway is running.";
+        } else {
+          errorMessageText = `Error: ${error.message}`;
+        }
+      }
+      
       const errorMessage: Message = {
         id: Date.now().toString(),
         role: "bot",
-        content: `❌ Error: ${error instanceof Error 
-          ? error.message 
-          : "Failed to connect to gateway. Make sure the gateway is running on http://localhost:3001"}`,
+        content: `❌ ${errorMessageText}`,
         messageType: "error",
       };
       setMessages((prev) => [...prev, errorMessage]);

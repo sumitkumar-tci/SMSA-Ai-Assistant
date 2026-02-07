@@ -24,7 +24,7 @@ app.get("/health", (req, res) => {
 app.use("/api", chatRouter);
 app.use("/api", uploadRouter);
 
-const port = process.env.PORT ?? 3001;
+const port = process.env.PORT ?? 3000;
 
 app.listen(port, () => {
   logger.info(`Gateway listening on http://localhost:${port}`);

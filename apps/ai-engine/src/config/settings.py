@@ -101,7 +101,9 @@ class SMSAAIAssistantSettings(BaseSettings):
     postgres_sslmode: str = Field(default="prefer", env="POSTGRES_SSLMODE")
 
     class Config:
-        env_file = str(ENV_FILE_PATH)  # Load from project root
+        # Try to load from .env file if it exists, but don't require it
+        # Environment variables take precedence and work even without .env file
+        env_file = str(ENV_FILE_PATH) if ENV_FILE_PATH.exists() else None
         env_file_encoding = "utf-8"
         extra = "ignore"  # Ignore extra fields from .env (like NODE_ENV, PORT, etc. for other services)
 

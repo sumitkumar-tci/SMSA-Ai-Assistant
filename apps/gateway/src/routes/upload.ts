@@ -40,8 +40,11 @@ router.post("/upload", upload.single("file"), async (req: Request, res: Response
     }
 
     // Forward to AI engine
-    const aiEngineUrl = process.env.AI_ENGINE_URL || "http://localhost:8000";
-    const response = await axios.post(`${aiEngineUrl}/upload`, formData, {
+    // AI_ENGINE_URL might be the full chat endpoint, so extract base URL
+    const aiEngineBaseUrl = process.env.AI_ENGINE_URL 
+      ? process.env.AI_ENGINE_URL.replace(/\/orchestrator\/chat$/, '')
+      : (process.env.AI_ENGINE_BASE_URL || "http://ai-engine:8000");
+    const response = await axios.post(`${aiEngineBaseUrl}/upload`, formData, {
       headers: {
         ...formData.getHeaders(),
       },
